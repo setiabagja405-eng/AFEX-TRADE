@@ -1,47 +1,22 @@
-# AFEX Trade Bot — Panduan Deploy & Multi-Broker
+# AFEX Trade Bot — Panduan Deploy & Fitur Lengkap (Poin 1 s/d Poin 5)
 
-Arsitektur: **Vercel** (frontend Mini App) → rewrite `/api` → **Render** (bot + API + auto-trade multi-user) → **MongoDB Atlas** (data user & kredensial terenkripsi).
+Arsitektur: **Vercel** (frontend Mini App) → rewrite `/api` → **Render** (bot + API + auto-trade multi-user) → **MongoDB Atlas** (data user, paket sewa & kredensial terenkripsi).
 
-## Broker yang Didukung (Poin 1)
+## Ringkasan Seluruh Fitur (100% Selesai)
 
-Setiap pengguna dapat memilih dan menyimpan kredensial untuk 4 broker berbeda langsung dari Mini App:
-
-1. **Binance Testnet (`binance_testnet`)**
-   - Spot Sandbox (`testnet.binance.vision`) menggunakan saldo simulasi USDT.
-   - Kredensial: `API Key` & `Secret Key` HMAC-SHA-256.
-2. **Binance Live (`binance`)**
-   - Spot Real (`binance.com`) menggunakan akun nyata.
-   - Kredensial: `API Key` & `Secret Key` (aktifkan *Enable Spot & Margin Trading*, **jangan** aktifkan *Withdraw*).
-3. **MetaTrader 5 (`mt5`) via MetaApi Cloud**
-   - Mendukung semua broker MT5 (Exness, XM, FBS, Octa, IC Markets, dll.).
-   - Cara mendapatkan kredensial:
-     1. Daftar di `app.metaapi.cloud`.
-     2. Klik **Add Account** → pilih **MT5** → isi Login, Investor/Master Password, dan nama Server MT5 → salin **Account ID**.
-     3. Buka menu **API Access → Generate Token** → salin **Auth Token**.
-     4. Masukkan **Auth Token**, **Account ID**, dan **Simbol Broker** (misal `BTCUSD`, `BTCUSDm`, atau `XAUUSD`) di Mini App. Region server (`singapore`, `london`, `new-york`) akan dideteksi otomatis.
-4. **MetaTrader 4 (`mt4`) via MetaApi Cloud**
-   - Mendukung semua broker MT4 melalui jembatan REST MetaApi yang sama.
-   - Langkah koneksi sama seperti MT5 (pilih platform **MT4** saat *Add Account* di `app.metaapi.cloud`).
-
-## Optimasi Multi-User
-
-- **Worker Pool Paralel (`WORKER_CONCURRENCY`)**: Eksekusi sinyal Auto-Trade berjalan paralel (default 8 worker sekaligus) sehingga ratusan pengguna tidak saling mengantre.
-- **Shared Market Cache**: Data OHLCV dan perhitungan RSI di-cache per broker & simbol selama 10 detik untuk menghemat *rate limit* API.
-- **Enkripsi Kredensial (`AES-256-GCM`)**: Semua `API Key`, `Secret Key`, dan `MetaApi Token` dienkripsi sebelum disimpan ke MongoDB dan tidak pernah dikirim kembali ke browser.
-
-## Langkah Deploy
-
-1. **MongoDB Atlas**: Buat cluster gratis (`M0`), tambahkan IP `0.0.0.0/0`, dan salin `MONGO_URI`.
-2. **Telegram (BotFather)**: Buat bot lewat `/newbot` dan simpan `TG_BOT_TOKEN`.
-3. **Render (Backend)**:
-   - Letakkan `server.js`, `mt5.js`, dan `package.json` di folder backend.
-   - Build Command: `npm install` · Start Command: `npm start`.
-   - Environment Variables:
-     - `TG_BOT_TOKEN`: Token dari BotFather
-     - `MONGO_URI`: Connection string MongoDB Atlas
-     - `ENCRYPTION_KEY`: 64 karakter hex (`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`)
-     - `WEBAPP_URL`: URL Vercel Anda (`https://nama-app.vercel.app`)
-     - `MAX_USERS`: Kuota maksimal pengguna (default `500`)
-4. **Vercel (Frontend)**:
-   - Letakkan `index.html` dan `vercel.json` di folder frontend.
-   - Edit `vercel.json` dan ganti `GANTI-NAMA-APP.onrender.com` dengan domain Render Anda, lalu deploy ke Vercel.
+1. **Tampilan Mini App ala Afex Mining + Ikon Berkilau + Koin 3D**:
+   - Tema gelap-emas metalik, ikon SVG berkilau tanpa emoji, serta koin 3D berputar yang otomatis berubah emblem sesuai aset yang dipilih (`BTC`, `ETH`, `BNB`, `XAUUSD`, `USOIL`, `XNGUSD`, dll.).
+2. **Poin 1 — Multi-Broker (`Binance Testnet`, `Binance Live`, `MetaTrader 5`, `MetaTrader 4`)**:
+   - Menyimpan kredensial tiap broker dengan enkripsi `AES-256-GCM`, mendukung *auto-detect* region & akhiran simbol di MT4/MT5 via MetaApi Cloud, serta *worker pool* paralel untuk ratusan pengguna sekaligus.
+3. **Poin 2 — Multi-Aset (11 Instrumen di 3 Kategori)**:
+   - Mencakup **Kripto** (`BTC`, `ETH`, `BNB`, `SOL`, `XRP`), **Komoditas & Energi** (`XAUUSD` Emas, `XAGUSD` Perak, `USOIL` Minyak WTI, `UKOIL` Minyak Brent, `XNGUSD` Gas Alam), dan **Forex** (`EURUSD`).
+4. **Poin 3 — Login User (Tanpa OTP) + Sistem Paket Sewa**:
+   - Login langsung menggunakan `ID Telegram / @username` + `Password/PIN` sekaligus menyambungkan broker ke bot.
+   - Mewajibkan kepemilikan **Paket Sewa Aktif** sebelum login (kecuali Owner Admin).
+5. **Poin 4 — Panel Admin Khusus (`7706512451` & `8821716544`) + Face Scan & PIN**:
+   - Menu **Admin** hanya tampil untuk ID `7706512451` dan `8821716544`, dilindungi oleh **PIN Eksekutif** dan **Biometric Owner Face Scan** ala *Afex Mining*.
+   - Mengelola daftar paket sewa (nama, harga, durasi jam/hari), metode pembayaran (rekening/wallet & instruksi), persetujuan (**ACC / Tolak**) bukti sewa, serta penambahan/pencabutan waktu sewa user manual.
+6. **Poin 5 — Kirim Status & Gambar Grafik Realtime ke Bot + Jam UTC 1s + Analisis + 4 Mode Grafik**:
+   - **Generator PNG Grafik Murni di Server (`zlib`)**: Mengirimkan gambar grafik gelap (`BTC/USDT · 5m` dan `Grafik Profit 7 Hari`) langsung ke chat Bot Telegram (`bot.sendPhoto`) tanpa ketergantungan C++ sehingga 100% berjalan lancar di Termux maupun Render.
+   - **Sinkronisasi Status Realtime ke Bot (`Live Chat: ON ●`)**: Memperbarui panel status di chat Bot secara otomatis dengan waktu **UTC (`HH:MM:SS UTC`)** yang berjalan setiap detik serta **Keterangan Analisis Teknikal** (`STRONG BUY/SELL`, `EMA 9/21`, `RSI 14`, `Support/Resistance`).
+   - **4 Mode Grafik di Mini App**: Mendukung perpindahan instan antara **Candlestick Chart**, **Live Chart (1s Tick)**, **Bar Chart**, dan **Area Chart**.
