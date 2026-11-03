@@ -1,0 +1,949 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AFEX Trade Bot — Multi-Broker</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:#080c14; --card:#121927; --line:rgba(234,179,8,.35); --line-soft:rgba(234,179,8,.16);
+    --gold:#facc15; --gold-soft:#fde68a; --gold-mid:#f3d479; --gold-dim:#c9a227; --gold-faint:#a8841f;
+    --green:#22c55e; --red:#ef4444;
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--gold-soft);
+    font:15px/1.4 'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; }
+  ::-webkit-scrollbar { width:5px; height:5px; }
+  ::-webkit-scrollbar-thumb { background:rgba(234,179,8,.25); border-radius:10px; }
+  ::selection { color:#080c14; background:var(--gold); }
+  .wrap { max-width:448px; margin:0 auto; min-height:100vh; padding:14px 14px 96px; }
+  .tab { display:none; } .tab.active { display:block; }
+  .gold-border { border:1px solid var(--line); }
+  .gold-card-bg { background:linear-gradient(135deg,rgba(22,31,51,.95) 0%,rgba(35,26,9,.6) 100%); }
+  .topbar { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:12px; }
+  .profile { display:flex; align-items:center; gap:8px; background:var(--card); padding:6px 12px 6px 8px; border-radius:12px; }
+  .avatar { width:32px; height:32px; border-radius:50%; background:#f59e0b; border:2px solid #eab308; color:#000;
+    font-weight:900; font-size:12px; display:flex; align-items:center; justify-content:center; box-shadow:0 0 10px rgba(234,179,8,.4); }
+  .profile b { display:block; font-size:12px; color:var(--gold-soft); }
+  .profile small { font-size:10px; color:var(--gold-dim); font-family:ui-monospace,Menlo,monospace; }
+  .pill { font-size:11px; font-weight:800; padding:7px 12px; border-radius:12px; background:var(--card); }
+  .pill.on { color:var(--green); border:1px solid rgba(34,197,94,.5); box-shadow:0 0 10px rgba(34,197,94,.25); }
+  .pill.off { color:var(--red); border:1px solid rgba(239,68,68,.45); }
+  .banner { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px; border-radius:12px; margin-bottom:14px; box-shadow:0 8px 20px rgba(0,0,0,.35); }
+  .banner-left { display:flex; align-items:center; gap:10px; min-width:0; }
+  .banner .ico { width:36px; height:36px; border-radius:12px; background:#eab308; color:#000; display:flex; align-items:center; justify-content:center; font-size:15px; flex:none; }
+  .banner h4 { margin:0; font-size:12px; font-weight:800; color:var(--gold); letter-spacing:.5px; }
+  .banner p { margin:2px 0 0; font-size:10px; color:var(--gold-dim); font-family:ui-monospace,Menlo,monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .btn-mini { border:1px solid var(--line); background:rgba(8,12,20,.75); color:var(--gold); border-radius:10px; padding:7px 10px; font-size:11px; font-weight:800; cursor:pointer; display:inline-flex; align-items:center; gap:5px; flex:none; }
+  .btn-mini:active { transform:scale(.96); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:14px; margin-bottom:12px; box-shadow:0 6px 18px rgba(0,0,0,.3); }
+  .card h3 { margin:0 0 10px; font-size:12px; color:var(--gold-dim); font-weight:700; letter-spacing:.8px; text-transform:uppercase; display:flex; align-items:center; justify-content:space-between; }
+  .hero { text-align:center; padding:18px 14px; box-shadow:0 0 45px rgba(234,179,8,.15); }
+  .hero .lbl { font-size:10px; color:var(--gold-dim); letter-spacing:1.5px; text-transform:uppercase; }
+  .price { font-size:34px; font-weight:900; font-family:ui-monospace,Menlo,monospace; color:var(--gold);
+    text-shadow:0 0 10px rgba(234,179,8,.8); letter-spacing:-.5px; margin-top:2px; }
+  .chips { display:flex; gap:8px; justify-content:center; margin-top:10px; flex-wrap:wrap; }
+  .chip { background:var(--bg); border:1px solid var(--line-soft); border-radius:999px; padding:4px 10px; font-size:11px; color:var(--gold-dim); font-family:ui-monospace,Menlo,monospace; }
+  .chip.ok { border-color:rgba(34,197,94,.45); color:#86efac; }
+  .chip.warn { border-color:rgba(250,204,21,.45); color:var(--gold-soft); }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:12px; }
+  .stat .k { font-size:11px; color:var(--gold-dim); }
+  .stat .v { font-size:16px; font-weight:800; margin-top:2px; word-break:break-all; font-family:ui-monospace,Menlo,monospace; color:var(--gold); }
+  .up { color:var(--green) !important; } .down { color:var(--red) !important; }
+  .chartbox { position:relative; height:190px; }
+  .row { display:flex; justify-content:space-between; padding:6px 0; font-size:13px; border-top:1px solid var(--line-soft); }
+  .row:first-child { border-top:0; } .row span:first-child { color:var(--gold-dim); }
+  .actions { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px; }
+  .btn { border:0; border-radius:12px; padding:13px 10px; font-size:13px; font-weight:900; color:#000; cursor:pointer;
+    background:linear-gradient(90deg,#eab308,#d97706); box-shadow:0 0 15px rgba(234,179,8,.35); }
+  .btn:active { transform:scale(.97); } .btn:hover { opacity:.92; } .btn[disabled] { opacity:.5; cursor:not-allowed; }
+  .btn.green { background:#16a34a; color:#fff; box-shadow:0 0 14px rgba(34,197,94,.3); }
+  .btn.red { background:#dc2626; color:#fff; box-shadow:0 0 14px rgba(239,68,68,.3); }
+  .btn.blue { grid-column:span 2; } .btn.auto { grid-column:span 2; }
+  .btn.auto.on { background:var(--card); color:var(--gold); border:1px solid var(--line); box-shadow:none; }
+  .btn.ghost { background:transparent; border:1px solid var(--line-soft); color:var(--gold-dim); box-shadow:none; font-weight:700; }
+  .form { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .form label { font-size:11px; color:var(--gold-dim); display:block; margin-bottom:4px; }
+  .form input, .form select { width:100%; padding:10px; border-radius:10px; border:1px solid var(--line-soft); background:var(--bg);
+    color:var(--gold-soft); font-size:14px; color-scheme:dark; outline:none; }
+  .form input:focus, .form select:focus { border-color:var(--gold); }
+  .form .btn { grid-column:span 2; margin-top:4px; }
+  .hint { color:var(--gold-dim); font-size:12px; margin:0 0 12px; line-height:1.5; background:rgba(8,12,20,.55); padding:10px 12px; border-radius:10px; border:1px solid var(--line-soft); }
+  .empty { color:var(--gold-faint); text-align:center; padding:6px 0; }
+
+  /* ===== PILIHAN BROKER (POIN 1) ===== */
+  .broker-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:12px; }
+  .bcard { background:var(--bg); border:1px solid var(--line-soft); border-radius:12px; padding:10px; cursor:pointer;
+    text-align:left; color:var(--gold-soft); transition:.2s; position:relative; display:flex; flex-direction:column; gap:3px; }
+  .bcard:hover { border-color:var(--line); }
+  .bcard.active { border-color:var(--gold); background:linear-gradient(135deg,rgba(234,179,8,.16) 0%,rgba(18,25,39,.95) 100%);
+    box-shadow:0 0 14px rgba(234,179,8,.22); }
+  .bcard .btop { display:flex; align-items:center; justify-content:space-between; font-size:12px; font-weight:800; color:var(--gold); }
+  .bcard .bsub { font-size:10px; color:var(--gold-dim); font-family:ui-monospace,Menlo,monospace; }
+  .bcard .bdot { width:8px; height:8px; border-radius:50%; background:rgba(234,179,8,.25); display:inline-block; }
+  .bcard.linked .bdot { background:var(--green); box-shadow:0 0 6px var(--green); }
+
+  /* ===== MODAL KONFIRMASI (PENGGANTI WINDOW.CONFIRM) ===== */
+  .modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,.72); backdrop-filter:blur(3px); display:none;
+    align-items:center; justify-content:center; padding:18px; z-index:200; }
+  .modal-backdrop.show { display:flex; }
+  .modal-box { width:100%; max-width:340px; background:var(--card); border:1px solid var(--gold); border-radius:16px;
+    padding:16px; box-shadow:0 12px 32px rgba(0,0,0,.65); text-align:center; }
+  .modal-box h4 { margin:0 0 8px; color:var(--gold); font-size:14px; }
+  .modal-box p { margin:0 0 14px; font-size:13px; color:var(--gold-soft); }
+  .modal-actions { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+
+  nav { position:fixed; bottom:0; left:0; right:0; max-width:448px; margin:0 auto; background:var(--card);
+    border-top:1px solid var(--line); display:flex; justify-content:space-around; padding:10px 8px calc(10px + env(safe-area-inset-bottom)); z-index:50; }
+  nav button { background:none; border:0; color:var(--gold-faint); display:flex; flex-direction:column; align-items:center; gap:3px;
+    font-size:10px; cursor:pointer; padding:2px 18px; transition:.2s; }
+  nav button i { font-size:17px; } nav button.active { color:var(--gold); }
+  nav button.active i { filter:drop-shadow(0 0 8px rgba(251,191,36,.8)); }
+  #toast { position:fixed; left:50%; bottom:84px; transform:translateX(-50%) translateY(40px); background:var(--card);
+    border:1px solid var(--line); color:var(--gold-soft); padding:11px 16px; border-radius:12px; font-size:13px;
+    opacity:0; transition:.25s; max-width:90%; text-align:center; z-index:100; pointer-events:none; }
+  #toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+  #toast.err { background:#7f1d1d; color:#fff; border-color:#ef4444; } #toast.ok { background:#14532d; color:#fff; border-color:#22c55e; }
+
+  /* ===== IKON EMAS BERKILAU (poin 2) ===== */
+  .gi { --g:linear-gradient(115deg,#a8741a 0%,#facc15 28%,#fff7c2 46%,#facc15 54%,#b8860b 80%,#fde68a 100%);
+    position:relative; display:inline-block; width:1.25em; height:1.25em; vertical-align:-.25em; flex:none;
+    filter:drop-shadow(0 0 3px rgba(250,204,21,.55)); }
+  .gi .m { position:absolute; inset:0; background:var(--g); background-size:260% 100%;
+    -webkit-mask:var(--m) center/contain no-repeat; mask:var(--m) center/contain no-repeat;
+    animation:gishine 3.2s linear infinite; animation-delay:var(--d,0s); }
+  .gi::before,.gi::after { content:""; position:absolute; background:#fffbe0; pointer-events:none; opacity:0;
+    clip-path:polygon(50% 0,62% 38%,100% 50%,62% 62%,50% 100%,38% 62%,0 50%,38% 38%);
+    filter:drop-shadow(0 0 3px #fde047); animation:gitwinkle 2.6s ease-in-out infinite; animation-delay:var(--d,0s); }
+  .gi::before { width:.5em; height:.5em; top:-.28em; right:-.2em; }
+  .gi::after { width:.32em; height:.32em; bottom:-.12em; left:-.14em; animation-delay:calc(var(--d,0s) + 1.1s); }
+  @keyframes gishine { 0% { background-position:130% 0; } 100% { background-position:-130% 0; } }
+  @keyframes gitwinkle { 0%,60%,100% { opacity:0; transform:scale(.2) rotate(0); } 75% { opacity:1; transform:scale(1) rotate(45deg); } }
+  h3 .gi,.stat .k .gi { margin-right:5px; }
+  .stat .k,.row span:first-child { display:flex; align-items:center; }
+  .btn { display:inline-flex; align-items:center; justify-content:center; gap:7px; }
+  .btn .gi { --g:linear-gradient(115deg,#fff 0%,#e8e8e8 35%,#fff 50%,#d9d9d9 70%,#fff 100%); filter:drop-shadow(0 0 3px rgba(255,255,255,.6)); }
+  .btn:not(.green):not(.red):not(.ghost):not(.on) .gi { --g:linear-gradient(115deg,#3b2a05 0%,#1a1202 40%,#6b4a0a 50%,#1a1202 60%,#3b2a05 100%); filter:none; }
+  .btn.ghost .gi,.btn.auto.on .gi { --g:linear-gradient(115deg,#a8741a 0%,#facc15 28%,#fff7c2 46%,#facc15 54%,#b8860b 80%,#fde68a 100%); }
+  .btn .gi::before,.btn .gi::after { background:#fff; }
+  nav button .gi { width:26px; height:26px; opacity:.55; filter:none; transition:.25s; }
+  nav button .gi .m { animation-play-state:paused; background:linear-gradient(180deg,#c9a227,#8a6a14); }
+  nav button.active .gi { opacity:1; transform:translateY(-2px) scale(1.12); filter:drop-shadow(0 0 7px rgba(251,191,36,.9)); }
+  nav button.active .gi .m { background:var(--g); background-size:260% 100%; animation-play-state:running; }
+  nav button:not(.active) .gi::before,nav button:not(.active) .gi::after { animation:none; opacity:0; }
+  .banner .ico .gi { --g:linear-gradient(115deg,#3b2a05,#1a1202 40%,#6b4a0a 50%,#1a1202 60%,#3b2a05); filter:none; width:22px; height:22px; }
+  .banner .ico .gi::before,.banner .ico .gi::after { background:#fff; }
+  .empty .gi { margin-right:5px; }
+  .row .gi { margin:0 5px 0 2px; } .row .gi:not(:first-child) { margin-left:8px; }
+  .lab { display:inline-flex; align-items:center; gap:5px; }
+
+  /* ===== KOIN 3D (poin 3) ===== */
+  .coinstage { position:relative; width:104px; height:104px; margin:-2px auto 8px; perspective:600px; }
+  .coinstage::before { content:""; position:absolute; inset:-14px; border-radius:50%;
+    background:radial-gradient(circle,rgba(250,204,21,.38) 0%,rgba(250,204,21,.12) 45%,transparent 70%); animation:halo 3s ease-in-out infinite; }
+  .coinstage::after { content:""; position:absolute; left:18%; right:18%; bottom:-10px; height:12px; border-radius:50%;
+    background:radial-gradient(ellipse,rgba(250,204,21,.35),transparent 70%); animation:halo 3s ease-in-out infinite; }
+  .disc { position:absolute; inset:0; transform-style:preserve-3d; animation:coinspin 7s cubic-bezier(.45,.05,.55,.95) infinite; }
+  .disc > i { position:absolute; inset:0; border-radius:50%; }
+  .disc .edge { background:linear-gradient(180deg,#fde68a,#b8860b 55%,#7a5a0c); }
+  .disc .face { background:var(--c) center/cover no-repeat; box-shadow:inset 0 0 0 3px #eab308, inset 0 0 14px rgba(0,0,0,.45); overflow:hidden; }
+  .disc .face.b { transform:rotateY(180deg) translateZ(5px); } .disc .face.f { transform:translateZ(5px); }
+  .disc .face::after { content:""; position:absolute; inset:0; border-radius:50%;
+    background:linear-gradient(115deg,transparent 35%,rgba(255,255,255,.55) 50%,transparent 65%); background-size:250% 100%;
+    animation:coinshine 3.5s linear infinite; }
+  .spk { position:absolute; width:16px; height:16px; background:#fffbe0; pointer-events:none; opacity:0;
+    clip-path:polygon(50% 0,62% 38%,100% 50%,62% 62%,50% 100%,38% 62%,0 50%,38% 38%);
+    filter:drop-shadow(0 0 4px #fde047); animation:gitwinkle 2.8s ease-in-out infinite; }
+  .spk.a { top:-6px; right:-8px; } .spk.b { bottom:6px; left:-12px; width:11px; height:11px; animation-delay:1.2s; }
+  .spk.c { top:14px; left:-18px; width:8px; height:8px; animation-delay:2s; } .spk.d { bottom:-4px; right:2px; width:9px; height:9px; animation-delay:.6s; }
+  @keyframes coinspin { 0% { transform:rotateY(0); } 40% { transform:rotateY(360deg); } 50% { transform:rotateY(360deg); } 90% { transform:rotateY(720deg); } 100% { transform:rotateY(720deg); } }
+  @keyframes coinshine { 0% { background-position:150% 0; } 100% { background-position:-150% 0; } }
+  @keyframes halo { 0%,100% { opacity:.65; transform:scale(.95); } 50% { opacity:1; transform:scale(1.06); } }
+  .pairrow { display:flex; align-items:center; justify-content:center; gap:8px; margin-bottom:2px; }
+  .mc { display:inline-block; width:1.5em; height:1.5em; border-radius:50%; margin-right:6px; vertical-align:-.4em; flex:none;
+    background:var(--c) center/cover no-repeat; box-shadow:0 0 0 1.5px #eab308,0 0 9px rgba(250,204,21,.55); position:relative; }
+  .mc::after { content:""; position:absolute; inset:0; border-radius:50%;
+    background:linear-gradient(115deg,transparent 35%,rgba(255,255,255,.6) 50%,transparent 65%); background-size:250% 100%; animation:coinshine 3.5s linear infinite; }
+  .mc.btc { --c:var(--coin-btc); } .mc.usdt { --c:var(--coin-usdt); }
+  @media (prefers-reduced-motion:reduce) { .disc,.disc .face::after,.mc::after,.spk,.coinstage::before { animation:none; } }
+</style>
+<style id="coin-art">:root{--coin-btc:url(data:image/webp;base64,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);--coin-usdt:url(data:image/webp;base64,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);}</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="profile gold-border">
+      <div class="avatar" id="avatar">U</div>
+      <div><b id="who">Memuat...</b><small><span id="pair">BTC/USDT</span> · <span id="tf">5m</span></small></div>
+    </div>
+    <span class="pill off" id="autoPill">AUTO OFF</span>
+  </div>
+
+  <!-- TAB: HOME -->
+  <div class="tab active" id="tab-home">
+    <div class="banner gold-card-bg gold-border">
+      <div class="banner-left">
+        <div class="ico"><span class="gi" data-i="bot"></span></div>
+        <div>
+          <h4>AFEX TRADE BOT</h4>
+          <p id="brokerSub">Binance Testnet · Auto RSI</p>
+        </div>
+      </div>
+      <button class="btn-mini" id="btnToggleBrokerPanel" type="button"><span class="gi" data-i="exchange"></span><span id="brokerBtnLbl">Broker</span></button>
+    </div>
+
+    <section class="card hero gold-card-bg">
+      <div class="coinstage">
+        <div class="disc">
+          <i class="edge" style="transform:translateZ(-4px)"></i><i class="edge" style="transform:translateZ(-2px)"></i><i class="edge" style="transform:translateZ(0)"></i><i class="edge" style="transform:translateZ(2px)"></i><i class="edge" style="transform:translateZ(4px)"></i>
+          <i class="face f" style="--c:var(--coin-btc)"></i><i class="face b" style="--c:var(--coin-usdt)"></i>
+        </div>
+        <span class="spk a"></span><span class="spk b"></span><span class="spk c"></span><span class="spk d"></span>
+      </div>
+      <div class="lbl">Harga Sekarang (<span id="heroSym">BTC/USDT</span>)</div>
+      <div class="price" id="price">—</div>
+      <div class="chips">
+        <span class="chip" id="brokerChip">Binance Testnet</span>
+        <span class="chip" id="rsiChip">RSI —</span>
+        <span class="chip" id="updated">memuat…</span>
+      </div>
+    </section>
+
+    <!-- KARTU PILIH & HUBUNGKAN BROKER (POIN 1) -->
+    <section class="card" id="setupCard" style="display:none">
+      <h3>
+        <span><span class="gi" data-i="key"></span>Pilih &amp; Hubungkan Broker</span>
+        <button class="btn-mini" id="btnCloseSetup" type="button" style="display:none">Tutup</button>
+      </h3>
+
+      <div class="broker-grid" id="brokerGrid">
+        <button type="button" class="bcard active" data-broker="binance_testnet">
+          <div class="btop"><span><span class="gi" data-i="exchange"></span>Binance Testnet</span><span class="bdot"></span></div>
+          <div class="bsub">Spot Sandbox · USDT</div>
+        </button>
+        <button type="button" class="bcard" data-broker="binance">
+          <div class="btop"><span><span class="gi" data-i="globe"></span>Binance Live</span><span class="bdot"></span></div>
+          <div class="bsub">Spot Real · USDT</div>
+        </button>
+        <button type="button" class="bcard" data-broker="mt5">
+          <div class="btop"><span><span class="gi" data-i="layers"></span>MetaTrader 5</span><span class="bdot"></span></div>
+          <div class="bsub">MT5 Cloud · Lot</div>
+        </button>
+        <button type="button" class="bcard" data-broker="mt4">
+          <div class="btop"><span><span class="gi" data-i="cpu"></span>MetaTrader 4</span><span class="bdot"></span></div>
+          <div class="bsub">MT4 Cloud · Lot</div>
+        </button>
+      </div>
+
+      <p class="hint" id="brokerHint">
+        Buat API Key di <b>testnet.binance.vision</b> (login GitHub). Cukup aktifkan izin Spot Trading. Key disimpan terenkripsi AES-256-GCM di server per user.
+      </p>
+
+      <!-- Tombol cepat jika broker yang dipilih sudah memiliki kredensial tersimpan -->
+      <div id="quickSwitchWrap" style="display:none;margin-bottom:10px">
+        <button class="btn green" id="btnQuickSwitch" type="button" style="width:100%">
+          <span class="gi" data-i="link"></span>Aktifkan Broker Ini (Kredensial Tersimpan)
+        </button>
+      </div>
+
+      <!-- Form Binance (Testnet / Live) -->
+      <div class="form" id="formBinance">
+        <div style="grid-column:span 2"><label>API Key (<span id="lblBinName">Binance Testnet</span>)</label><input id="k_api" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Masukkan API Key..."></div>
+        <div style="grid-column:span 2"><label>Secret Key</label><input id="k_secret" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Masukkan Secret Key..."></div>
+      </div>
+
+      <!-- Form MetaTrader 4 / MetaTrader 5 (MetaApi) -->
+      <div class="form" id="formMt" style="display:none">
+        <div style="grid-column:span 2"><label>MetaApi Auth Token</label><input id="k_token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Token dari app.metaapi.cloud..."></div>
+        <div><label>Account ID (MetaApi)</label><input id="k_accid" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Contoh: a1b2c3d4-..."></div>
+        <div>
+          <label>Region Server</label>
+          <select id="k_region">
+            <option value="singapore">Auto / Singapore</option>
+            <option value="london">London</option>
+            <option value="new-york">New York</option>
+          </select>
+        </div>
+        <div style="grid-column:span 2"><label>Simbol Broker MT4/MT5 (contoh: BTCUSD, BTCUSDm, XAUUSD)</label><input id="k_mtsym" type="text" value="BTCUSD" autocomplete="off" autocapitalize="characters" spellcheck="false"></div>
+      </div>
+
+      <div class="form" style="margin-top:8px">
+        <button class="btn blue" id="btnKeys" type="button"><span class="gi" data-i="link"></span>Simpan &amp; Hubungkan Broker</button>
+      </div>
+    </section>
+
+    <section class="grid">
+      <div class="stat"><div class="k" id="lblQuoteCard"><span class="mc usdt"></span>USDT</div><div class="v" id="usdt">—</div></div>
+      <div class="stat"><div class="k" id="lblBaseCard"><span class="mc btc"></span>BTC</div><div class="v" id="btc">—</div></div>
+      <div class="stat"><div class="k"><span class="gi" data-i="calc"></span><span id="lblTotalCard">Total</span></div><div class="v" id="total">—</div></div>
+      <div class="stat"><div class="k"><span class="gi" data-i="trend"></span>Profit tertutup</div><div class="v" id="realized">—</div></div>
+    </section>
+
+    <section class="card" id="posCard">
+      <h3><span><span class="gi" data-i="pin"></span>Posisi bot</span></h3>
+      <div id="posBody" class="empty"><span class="gi" data-i="inbox"></span>Tidak ada posisi</div>
+    </section>
+
+    <section class="actions" id="actions">
+      <button class="btn green" id="btnBuy" type="button"><span class="gi" data-i="buy"></span>Buy</button>
+      <button class="btn red" id="btnSell" type="button"><span class="gi" data-i="sell"></span>Jual posisi</button>
+      <button class="btn auto" id="btnAuto" type="button"><span class="gi" data-i="power"></span>Auto-Trade</button>
+      <button class="btn blue" id="btnSend" type="button"><span class="gi" data-i="send"></span>Kirim status ke chat</button>
+    </section>
+  </div>
+
+  <!-- TAB: GRAFIK -->
+  <div class="tab" id="tab-chart">
+    <section class="card"><h3><span><span class="gi" data-i="chart"></span>Harga</span></h3><div class="chartbox"><canvas id="priceChart"></canvas></div></section>
+    <section class="card"><h3><span><span class="gi" data-i="activity"></span>RSI</span></h3><div class="chartbox"><canvas id="rsiChart"></canvas></div></section>
+    <section class="card"><h3><span><span class="gi" data-i="trend"></span>Profit 7 hari</span></h3><div class="chartbox"><canvas id="pnlChart"></canvas></div></section>
+  </div>
+
+  <!-- TAB: SETELAN -->
+  <div class="tab" id="tab-setting">
+    <section class="card">
+      <h3><span><span class="gi" data-i="exchange"></span>Broker Aktif</span></h3>
+      <div class="row"><span>Broker saat ini</span><b id="stBrokerName">Binance Testnet</b></div>
+      <div class="row"><span>Status koneksi</span><b id="stBrokerStatus">Belum terhubung</b></div>
+      <div class="row"><span>Simbol / Pair</span><b id="stBrokerSym">BTC/USDT</b></div>
+      <div style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <button class="btn ghost" id="btnOpenBrokerFromSet" type="button"><span class="gi" data-i="exchange"></span>Ganti / Atur Broker</button>
+        <button class="btn ghost" id="btnDelKeys" type="button"><span class="gi" data-i="trash"></span>Putuskan Broker</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h3><span><span class="gi" data-i="sliders"></span>Pengaturan Strategi &amp; Order</span></h3>
+      <div class="form">
+        <div><label id="lblAmountInput">Jumlah beli (BTC)</label><input id="s_amount" type="number" step="0.0001" inputmode="decimal"></div>
+        <div><label>Take profit (%)</label><input id="s_tp" type="number" step="0.1" inputmode="decimal"></div>
+        <div><label>Stop loss (%)</label><input id="s_sl" type="number" step="0.1" inputmode="decimal"></div>
+        <div><label>RSI beli (di bawah)</label><input id="s_rsiBuy" type="number" step="1" inputmode="decimal"></div>
+        <div><label>RSI jual (di atas)</label><input id="s_rsiSell" type="number" step="1" inputmode="decimal"></div>
+        <div id="wrapSetMtSym" style="display:none"><label>Simbol MT4/MT5</label><input id="s_mtSymbol" type="text" autocomplete="off" autocapitalize="characters"></div>
+        <button class="btn blue" id="btnSave" type="button"><span class="gi" data-i="save"></span>Simpan pengaturan</button>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- Modal Konfirmasi -->
+<div class="modal-backdrop" id="confirmModal">
+  <div class="modal-box">
+    <h4>Konfirmasi</h4>
+    <p id="confirmText">Lanjutkan aksi ini?</p>
+    <div class="modal-actions">
+      <button class="btn ghost" id="btnConfirmCancel" type="button">Batal</button>
+      <button class="btn" id="btnConfirmOk" type="button">Ya, Lanjutkan</button>
+    </div>
+  </div>
+</div>
+
+<nav>
+  <button class="active" data-tab="home" type="button"><span class="gi" data-i="home"></span><span>Home</span></button>
+  <button data-tab="chart" type="button"><span class="gi" data-i="chart"></span><span>Grafik</span></button>
+  <button data-tab="setting" type="button"><span class="gi" data-i="sliders"></span><span>Setelan</span></button>
+</nav>
+<div id="toast"></div>
+
+<script>
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); try { tg.setHeaderColor('#080c14'); tg.setBackgroundColor('#080c14'); } catch (e) {} }
+
+const API_BASE = ''; // kosong = lewat rewrite vercel.json. Isi URL Render jika tidak memakai rewrite.
+const $ = (id) => document.getElementById(id);
+const fmt = (n, d = 2) => Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+const sign = (v, d = 2) => (v >= 0 ? '+' : '') + fmt(v, d);
+const cls = (v) => (v >= 0 ? 'up' : 'down');
+
+// ---------- Info Katalog Broker di UI ----------
+const BROKER_META = {
+  binance_testnet: {
+    name: 'Binance Testnet',
+    short: 'Testnet',
+    isMt: false,
+    unit: 'BTC',
+    quote: 'USDT',
+    hint: 'Buat API Key di <b>testnet.binance.vision</b> (login GitHub). Cukup izin Spot Trading, jangan centang Withdraw. Key disimpan terenkripsi AES-256-GCM.',
+  },
+  binance: {
+    name: 'Binance Live',
+    short: 'Binance',
+    isMt: false,
+    unit: 'BTC',
+    quote: 'USDT',
+    hint: 'Buat API Key di <b>binance.com → API Management</b>. Aktifkan izin <b>Enable Spot &amp; Margin Trading</b> dan jangan aktifkan penarikan (Withdraw).',
+  },
+  mt5: {
+    name: 'MetaTrader 5',
+    short: 'MT5',
+    isMt: true,
+    unit: 'Lot',
+    quote: 'USD',
+    hint: 'Hubungkan akun MT5 melalui <b>app.metaapi.cloud</b>: (1) Klik <b>Add Account</b> &amp; masukkan login/server MT5 Anda lalu salin <b>Account ID</b>, (2) Buka <b>API Access</b> untuk menyalin <b>Auth Token</b>. Region terdeteksi otomatis.',
+  },
+  mt4: {
+    name: 'MetaTrader 4',
+    short: 'MT4',
+    isMt: true,
+    unit: 'Lot',
+    quote: 'USD',
+    hint: 'Hubungkan akun MT4 melalui <b>app.metaapi.cloud</b>: (1) Klik <b>Add Account</b> &amp; pilih MT4 lalu salin <b>Account ID</b>, (2) Buka <b>API Access</b> untuk menyalin <b>Auth Token</b>. Region terdeteksi otomatis.',
+  },
+};
+
+// ---------- Ikon emas berkilau (SVG mask, tanpa emoji) ----------
+const ICONS = {
+  home:'<path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/><path d="M10 21v-6h4v6"/>',
+  chart:'<path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>',
+  sliders:'<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+  bot:'<rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4M9 4h6"/><circle cx="9" cy="14" r="1"/><circle cx="15" cy="14" r="1"/><path d="M2 14h2M20 14h2"/>',
+  key:'<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M16 7l3 3M14 9l2 2"/>',
+  link:'<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+  dollar:'<path d="M12 2v20M17 6H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>',
+  coin:'<circle cx="12" cy="12" r="9"/><path d="M10 7.5v9M10 7.5h3a2 2 0 0 1 0 4h-3m0 0h3.5a2.25 2.25 0 0 1 0 4.5H10M11.5 6v1.5M11.5 16.5V18"/>',
+  calc:'<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 7h8M8 12h.01M12 12h.01M16 12h.01M8 16h.01M12 16h.01M16 16h.01"/>',
+  trend:'<path d="m3 17 6-6 4 4 8-8"/><path d="M15 7h6v6"/>',
+  pin:'<path d="M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.8 12 21 12 21Z"/><circle cx="12" cy="9.5" r="2.5"/>',
+  buy:'<circle cx="12" cy="12" r="9"/><path d="m8 12 4-4 4 4M12 8v8"/>',
+  sell:'<circle cx="12" cy="12" r="9"/><path d="m8 12 4 4 4-4M12 16V8"/>',
+  power:'<path d="M12 3v9"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/>',
+  send:'<path d="m22 2-11 11M22 2l-7 20-4-9-9-4 20-7Z"/>',
+  save:'<path d="M5 3h11l4 4v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z"/><path d="M8 3v5h7V3M8 21v-7h8v7"/>',
+  trash:'<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v5M14 11v5"/>',
+  target:'<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+  shield:'<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6l-8-3Z"/><path d="M12 8v5M12 16h.01"/>',
+  activity:'<path d="M3 12h4l3-8 4 16 3-8h4"/>',
+  snow:'<path d="M12 2v20M4 7l16 10M20 7 4 17"/>',
+  flame:'<path d="M12 22c4 0 7-2.8 7-7 0-3-1.8-5-3.5-7-.5 2-1.5 3-3 3 0-4-1.5-6-3.5-8C8 6 5 9.5 5 15c0 4.2 3 7 7 7Z"/>',
+  neutral:'<circle cx="12" cy="12" r="9"/><path d="M8 12h8"/>',
+  inbox:'<path d="M3 13l3-8h12l3 8v6H3v-6Z"/><path d="M3 13h5l1 3h6l1-3h5"/>',
+  exchange:'<path d="M17 4l4 4-4 4"/><path d="M3 8h18"/><path d="M7 20l-4-4 4-4"/><path d="M21 16H3"/>',
+  globe:'<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18a14 14 0 0 1 0-18Z"/>',
+  layers:'<path d="m12 3 9 4.5-9 4.5-9-4.5L12 3Z"/><path d="m3 12 9 4.5 9-4.5"/><path d="m3 16.5 9 4.5 9-4.5"/>',
+  cpu:'<rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+};
+const maskUrl = (n) => 'url(\'data:image/svg+xml,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (ICONS[n] || ICONS.bot) + '</svg>') + '\')';
+let icN = 0;
+const ic = (n) => `<span class="gi" style="--m:${maskUrl(n)};--d:${((icN++ * 0.37) % 3).toFixed(2)}s"><span class="m"></span></span>`;
+document.querySelectorAll('[data-i]').forEach((el) => { el.outerHTML = ic(el.dataset.i); });
+
+let toastTimer;
+function toast(msg, type) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'show ' + (type || '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.className = ''), 2800);
+}
+function haptic(kind) {
+  try { tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(kind); } catch (e) {}
+}
+
+// ---------- Modal Konfirmasi ----------
+let confirmResolver = null;
+function confirmBox(msg) {
+  return new Promise((resolve) => {
+    if (tg && tg.showConfirm) {
+      tg.showConfirm(msg, resolve);
+      return;
+    }
+    confirmResolver = resolve;
+    $('confirmText').textContent = msg;
+    $('confirmModal').classList.add('show');
+  });
+}
+$('btnConfirmCancel').addEventListener('click', () => {
+  $('confirmModal').classList.remove('show');
+  if (confirmResolver) { confirmResolver(false); confirmResolver = null; }
+});
+$('btnConfirmOk').addEventListener('click', () => {
+  $('confirmModal').classList.remove('show');
+  if (confirmResolver) { confirmResolver(true); confirmResolver = null; }
+});
+
+// ---------- Simulasi Preview (Aktif HANYA jika dibuka di luar Telegram tanpa backend) ----------
+const hasTgInit = !!(tg && tg.initData);
+const simState = {
+  broker: 'binance_testnet',
+  mtSymbol: 'BTCUSD',
+  connected: { binance_testnet: true },
+  isAutoTrade: true,
+  price: 87420.5,
+  rsi: 44.2,
+  usdt: 87729.23,
+  btc: 0.001,
+  realizedPnl: 18.45,
+  position: { amount: 0.001, entry: 87150.0 },
+  settings: { amount: 0.001, tp: 1.0, sl: 0.7, rsiBuy: 30, rsiSell: 70 },
+  history: [
+    { date: '2026-10-28', pnl: 4.2 },
+    { date: '2026-10-29', pnl: -1.8 },
+    { date: '2026-10-30', pnl: 6.5 },
+    { date: '2026-10-31', pnl: 3.1 },
+    { date: '2026-11-01', pnl: 2.95 },
+    { date: '2026-11-02', pnl: 3.5 },
+  ],
+};
+
+function buildSimSnapshot() {
+  const b = BROKER_META[simState.broker] || BROKER_META.binance_testnet;
+  const isMt = b.isMt;
+  const sym = isMt ? simState.mtSymbol : 'BTC/USDT';
+  const hasKeys = !!simState.connected[simState.broker];
+  const now = Date.now();
+  const labels = [];
+  const closes = [];
+  const rsiArr = [];
+  for (let i = 24; i >= 0; i--) {
+    const t = new Date(now - i * 300000);
+    labels.push(t.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }));
+    const p = simState.price - Math.sin(i * 0.45) * 280 + (24 - i) * 6;
+    closes.push(Number(p.toFixed(2)));
+    rsiArr.push(Number((45 + Math.cos(i * 0.5) * 18).toFixed(1)));
+  }
+  simState.price = closes[closes.length - 1];
+  simState.rsi = rsiArr[rsiArr.length - 1];
+  const pos = hasKeys && simState.position
+    ? {
+        amount: simState.position.amount,
+        entry: simState.position.entry,
+        floating: (simState.price - simState.position.entry) * simState.position.amount * (isMt ? 10 : 1),
+        pct: ((simState.price - simState.position.entry) / simState.position.entry) * 100,
+        tp: simState.position.entry * (1 + simState.settings.tp / 100),
+        sl: simState.position.entry * (1 - simState.settings.sl / 100),
+        unit: b.unit,
+        symbol: sym,
+      }
+    : null;
+  const usdtVal = hasKeys ? (isMt ? 10500.0 : simState.usdt) : 0;
+  const btcVal = hasKeys ? (pos ? pos.amount : 0) : 0;
+  return {
+    broker: simState.broker,
+    brokerName: b.name,
+    brokerShort: b.short,
+    isMt,
+    unit: b.unit,
+    quote: b.quote,
+    mtRegion: 'singapore',
+    mtSymbol: simState.mtSymbol,
+    connectedBrokers: Object.keys(simState.connected).filter((k) => simState.connected[k]),
+    symbol: sym,
+    base: 'BTC',
+    timeframe: '5m',
+    name: 'AFEX Trader (Preview)',
+    hasKeys,
+    keyError: null,
+    price: simState.price,
+    rsi: simState.rsi,
+    usdt: usdtVal,
+    btc: btcVal,
+    total: isMt ? usdtVal + (pos ? pos.floating : 0) : usdtVal + btcVal * simState.price,
+    position: pos,
+    realizedPnl: simState.realizedPnl,
+    isAutoTrade: hasKeys && simState.isAutoTrade,
+    today: { trades: 4, pnl: 3.5 },
+    settings: simState.settings,
+    history: simState.history,
+    candles: { labels, closes, rsi: rsiArr },
+    updatedAt: now,
+  };
+}
+
+function handleSimApi(path, method, body) {
+  const b = BROKER_META[simState.broker] || BROKER_META.binance_testnet;
+  if (path === 'status') return { ok: true, data: buildSimSnapshot() };
+  if (path === 'broker') {
+    if (body && BROKER_META[body.broker]) {
+      simState.broker = body.broker;
+      if (body.mtSymbol) simState.mtSymbol = String(body.mtSymbol).toUpperCase();
+      simState.settings.amount = BROKER_META[simState.broker].isMt ? 0.01 : 0.001;
+    }
+    return { ok: true, message: 'Broker aktif: ' + BROKER_META[simState.broker].name };
+  }
+  if (path === 'keys' && method === 'POST') {
+    const target = (body && body.broker) || simState.broker;
+    simState.broker = target;
+    if (body && body.mtSymbol) simState.mtSymbol = String(body.mtSymbol).toUpperCase();
+    simState.connected[target] = true;
+    simState.settings.amount = BROKER_META[target].isMt ? 0.01 : 0.001;
+    return { ok: true, message: BROKER_META[target].name + ' berhasil terhubung ●' };
+  }
+  if (path === 'keys' && method === 'DELETE') {
+    delete simState.connected[simState.broker];
+    simState.position = null;
+    simState.isAutoTrade = false;
+    return { ok: true, message: 'Kredensial ' + b.name + ' dihapus' };
+  }
+  if (path === 'buy') {
+    const amt = Number(simState.settings.amount) || (b.isMt ? 0.01 : 0.001);
+    simState.position = { amount: amt, entry: simState.price };
+    return { ok: true, message: `BUY ${amt} ${b.unit} @ ${fmt(simState.price)}` };
+  }
+  if (path === 'sell') {
+    if (!simState.position) throw new Error('Tidak ada posisi bot untuk dijual');
+    const pnl = 4.25;
+    simState.realizedPnl += pnl;
+    simState.position = null;
+    return { ok: true, message: `SELL berhasil · PnL +${fmt(pnl)} ${b.quote}` };
+  }
+  if (path === 'auto') {
+    simState.isAutoTrade = !!(body && body.on);
+    return { ok: true, message: 'Auto-Trade ' + (simState.isAutoTrade ? 'AKTIF' : 'NONAKTIF') };
+  }
+  if (path === 'settings') {
+    Object.assign(simState.settings, {
+      amount: Number(body.amount) || simState.settings.amount,
+      tp: Number(body.tp) || simState.settings.tp,
+      sl: Number(body.sl) || simState.settings.sl,
+      rsiBuy: Number(body.rsiBuy) || simState.settings.rsiBuy,
+      rsiSell: Number(body.rsiSell) || simState.settings.rsiSell,
+    });
+    if (body.mtSymbol) simState.mtSymbol = String(body.mtSymbol).toUpperCase();
+    return { ok: true, message: 'Pengaturan disimpan', settings: simState.settings };
+  }
+  if (path === 'send-status') {
+    return { ok: true, message: 'Status terkirim ke chat bot' };
+  }
+  return { ok: true };
+}
+
+async function api(path, method, body) {
+  try {
+    const res = await fetch(API_BASE + '/api/' + path, {
+      method: method || 'GET',
+      headers: { 'Content-Type': 'application/json', 'x-init-data': (tg && tg.initData) || '' },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    let j;
+    try { j = await res.json(); } catch (e) { j = null; }
+    if (!j || (!res.ok && !hasTgInit)) {
+      return handleSimApi(path, method || 'GET', body || {});
+    }
+    if (!j.ok) throw new Error(j.error || 'Gagal');
+    return j;
+  } catch (err) {
+    if (!hasTgInit) {
+      return handleSimApi(path, method || 'GET', body || {});
+    }
+    throw err;
+  }
+}
+
+// ---------- Grafik ----------
+Chart.defaults.color = '#c9a227';
+Chart.defaults.borderColor = 'rgba(234,179,8,.12)';
+const baseOpts = (extra) => Object.assign({
+  responsive: true, maintainAspectRatio: false, animation: false,
+  plugins: { legend: { display: false } },
+  scales: { x: { ticks: { maxTicksLimit: 6 }, grid: { display: false } } },
+}, extra || {});
+
+const priceChart = new Chart($('priceChart'), { type: 'line', data: { labels: [], datasets: [] },
+  options: baseOpts({ plugins: { legend: { display: true, labels: { boxWidth: 10, font: { size: 11 } } } } }) });
+const rsiChart = new Chart($('rsiChart'), { type: 'line', data: { labels: [], datasets: [] },
+  options: baseOpts({ scales: { x: { ticks: { maxTicksLimit: 6 }, grid: { display: false } }, y: { min: 0, max: 100 } } }) });
+const pnlChart = new Chart($('pnlChart'), { type: 'bar', data: { labels: [], datasets: [] }, options: baseOpts() });
+
+const flat = (len, v) => Array(len).fill(v);
+const dashed = (label, v, len, color, dash) => ({
+  label, data: flat(len, v), borderColor: color, borderWidth: 1.5, borderDash: dash, pointRadius: 0, fill: false,
+});
+
+function renderCharts(s) {
+  const { labels, closes, rsi } = s.candles;
+  if (!closes || !closes.length) return;
+  const up = closes[closes.length - 1] >= closes[0];
+  const main = up ? '#22c55e' : '#ef4444';
+  const ds = [{
+    label: 'Harga', data: closes, borderColor: main, borderWidth: 2.2, pointRadius: 0, tension: 0.3,
+    fill: true, backgroundColor: up ? 'rgba(34,197,94,.12)' : 'rgba(239,68,68,.12)',
+  }];
+  let lo = Math.min(...closes), hi = Math.max(...closes);
+  if (s.position) {
+    ds.push(dashed('Entry', s.position.entry, closes.length, '#facc15', []));
+    ds.push(dashed('TP', s.position.tp, closes.length, '#4ade80', [6, 4]));
+    ds.push(dashed('SL', s.position.sl, closes.length, '#f87171', [6, 4]));
+    lo = Math.min(lo, s.position.sl); hi = Math.max(hi, s.position.tp);
+  }
+  const pad = (hi - lo) * 0.1 || 1;
+  priceChart.data.labels = labels;
+  priceChart.data.datasets = ds;
+  priceChart.options.scales.y = { min: lo - pad, max: hi + pad };
+  priceChart.update();
+
+  rsiChart.data.labels = labels;
+  rsiChart.data.datasets = [
+    { label: 'RSI', data: rsi, borderColor: '#facc15', borderWidth: 2, pointRadius: 0, tension: 0.3 },
+    dashed('Beli', s.settings.rsiBuy, rsi.length, '#4ade80', [5, 4]),
+    dashed('Jual', s.settings.rsiSell, rsi.length, '#f87171', [5, 4]),
+  ];
+  rsiChart.update();
+
+  pnlChart.data.labels = s.history.map((h) => h.date.slice(5));
+  pnlChart.data.datasets = [{
+    data: s.history.map((h) => Number(h.pnl.toFixed(4))),
+    backgroundColor: s.history.map((h) => (h.pnl >= 0 ? '#22c55e' : '#ef4444')),
+    borderRadius: 6,
+  }];
+  pnlChart.update();
+}
+
+// ---------- Logika Pilihan Broker ----------
+let selectedBrokerForm = 'binance_testnet';
+let manualShowSetup = false;
+let lastSnap = null;
+
+function renderBrokerForm(brokerId) {
+  selectedBrokerForm = BROKER_META[brokerId] ? brokerId : 'binance_testnet';
+  const meta = BROKER_META[selectedBrokerForm];
+  const connectedList = (lastSnap && lastSnap.connectedBrokers) || [];
+
+  document.querySelectorAll('#brokerGrid .bcard').forEach((card) => {
+    const id = card.dataset.broker;
+    card.classList.toggle('active', id === selectedBrokerForm);
+    card.classList.toggle('linked', connectedList.includes(id));
+  });
+
+  $('brokerHint').innerHTML = meta.hint;
+  $('formBinance').style.display = meta.isMt ? 'none' : 'grid';
+  $('formMt').style.display = meta.isMt ? 'grid' : 'none';
+  if (!meta.isMt) {
+    $('lblBinName').textContent = meta.name;
+  }
+
+  const alreadySaved = connectedList.includes(selectedBrokerForm) && (!lastSnap || lastSnap.broker !== selectedBrokerForm);
+  $('quickSwitchWrap').style.display = alreadySaved ? 'block' : 'none';
+}
+
+document.querySelectorAll('#brokerGrid .bcard').forEach((card) => {
+  card.addEventListener('click', () => {
+    renderBrokerForm(card.dataset.broker);
+  });
+});
+
+$('btnToggleBrokerPanel').addEventListener('click', () => {
+  manualShowSetup = !manualShowSetup;
+  if (lastSnap) {
+    renderBrokerForm(lastSnap.broker);
+    $('setupCard').style.display = !lastSnap.hasKeys || manualShowSetup ? '' : 'none';
+    $('btnCloseSetup').style.display = lastSnap.hasKeys && manualShowSetup ? '' : 'none';
+  }
+});
+
+$('btnCloseSetup').addEventListener('click', () => {
+  manualShowSetup = false;
+  if (lastSnap && lastSnap.hasKeys) $('setupCard').style.display = 'none';
+});
+
+$('btnOpenBrokerFromSet').addEventListener('click', () => {
+  manualShowSetup = true;
+  if (lastSnap) renderBrokerForm(lastSnap.broker);
+  $('setupCard').style.display = '';
+  $('btnCloseSetup').style.display = lastSnap && lastSnap.hasKeys ? '' : 'none';
+  document.querySelector('nav button[data-tab="home"]').click();
+});
+
+// ---------- Render ----------
+let settingsFilled = false;
+function render(s) {
+  lastSnap = s;
+  const isMt = !!s.isMt;
+  const quote = s.quote || (isMt ? 'USD' : 'USDT');
+  const unit = s.unit || (isMt ? 'Lot' : 'BTC');
+
+  $('pair').textContent = s.symbol;
+  $('heroSym').textContent = s.symbol;
+  $('tf').textContent = s.timeframe;
+  $('who').textContent = s.name || '';
+  $('avatar').textContent = (s.name || 'U').trim().charAt(0).toUpperCase() || 'U';
+  $('brokerSub').textContent = `${s.brokerName || 'Binance Testnet'} · Auto RSI`;
+  $('brokerBtnLbl').textContent = s.brokerShort || 'Broker';
+  $('brokerChip').textContent = `${s.brokerName || 'Testnet'} ${s.hasKeys ? '●' : '○'}`;
+  $('brokerChip').className = 'chip ' + (s.hasKeys ? 'ok' : 'warn');
+
+  $('price').textContent = fmt(s.price);
+  const r = s.rsi;
+  const label = r < s.settings.rsiBuy ? ic('snow') + 'Oversold' : r > s.settings.rsiSell ? ic('flame') + 'Overbought' : ic('neutral') + 'Netral';
+  $('rsiChip').innerHTML = `<span class="lab">RSI ${r ? r.toFixed(1) : '—'}${r ? ' · ' + label : ''}</span>`;
+  $('updated').textContent = s.keyError || (new Date(s.updatedAt).toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta' }) + ' WIB');
+
+  const showSetup = !s.hasKeys || manualShowSetup;
+  $('setupCard').style.display = showSetup ? '' : 'none';
+  $('btnCloseSetup').style.display = s.hasKeys && manualShowSetup ? '' : 'none';
+  $('actions').style.display = s.hasKeys ? '' : 'none';
+  $('btnDelKeys').style.display = s.hasKeys ? '' : 'none';
+
+  if (!manualShowSetup) {
+    renderBrokerForm(s.broker || 'binance_testnet');
+  } else {
+    renderBrokerForm(selectedBrokerForm);
+  }
+
+  // Kartu Saldo & Aset Dinamis (Spot vs MT4/MT5)
+  if (isMt) {
+    $('lblQuoteCard').innerHTML = `<span class="mc usdt"></span>Saldo (${quote})`;
+    $('lblBaseCard').innerHTML = `<span class="mc btc"></span>Lot Aktif`;
+    $('lblTotalCard').textContent = `Equity (${quote})`;
+    $('usdt').textContent = fmt(s.usdt);
+    $('btc').textContent = Number(s.btc || 0).toFixed(2) + ' Lot';
+    $('total').textContent = fmt(s.total);
+  } else {
+    $('lblQuoteCard').innerHTML = `<span class="mc usdt"></span>${quote}`;
+    $('lblBaseCard').innerHTML = `<span class="mc btc"></span>${s.base || 'BTC'}`;
+    $('lblTotalCard').textContent = `Total (${quote})`;
+    $('usdt').textContent = fmt(s.usdt);
+    $('btc').textContent = Number(s.btc || 0).toFixed(6);
+    $('total').textContent = fmt(s.total);
+  }
+  $('realized').textContent = `${sign(s.realizedPnl)} ${quote}`;
+  $('realized').className = 'v ' + cls(s.realizedPnl);
+
+  const pill = $('autoPill');
+  pill.textContent = s.isAutoTrade ? 'AUTO ON' : 'AUTO OFF';
+  pill.className = 'pill ' + (s.isAutoTrade ? 'on' : 'off');
+  $('btnAuto').innerHTML = ic('power') + (s.isAutoTrade ? 'Matikan Auto-Trade' : 'Nyalakan Auto-Trade');
+  $('btnAuto').classList.toggle('on', s.isAutoTrade);
+  $('btnBuy').innerHTML = ic('buy') + `Buy ${s.settings.amount} ${unit}`;
+
+  // Info di Tab Setelan
+  $('stBrokerName').textContent = s.brokerName || 'Binance Testnet';
+  $('stBrokerStatus').textContent = s.hasKeys ? 'Terhubung ●' : 'Belum terhubung ○';
+  $('stBrokerStatus').className = s.hasKeys ? 'up' : 'down';
+  $('stBrokerSym').textContent = s.symbol;
+  $('lblAmountInput').textContent = isMt ? 'Ukuran order (Lot)' : `Jumlah beli (${s.base || 'BTC'})`;
+  $('s_amount').step = isMt ? '0.01' : '0.0001';
+  $('wrapSetMtSym').style.display = isMt ? 'block' : 'none';
+
+  const p = s.position;
+  if (p) {
+    const pAmt = isMt ? Number(p.amount).toFixed(2) : Number(p.amount).toFixed(6);
+    $('posBody').className = '';
+    $('posBody').innerHTML =
+      `<div class="row"><span>Jumlah</span><b>${pAmt} ${unit}</b></div>` +
+      `<div class="row"><span>Entry</span><b>${fmt(p.entry)}</b></div>` +
+      `<div class="row"><span>Floating</span><b class="${cls(p.floating)}">${sign(p.floating)} ${quote} (${sign(p.pct)}%)</b></div>` +
+      `<div class="row"><span>${ic('target')}TP / ${ic('shield')}SL</span><b>${fmt(p.tp)} / ${fmt(p.sl)}</b></div>`;
+  } else {
+    $('posBody').className = 'empty';
+    $('posBody').innerHTML = ic('inbox') + 'Tidak ada posisi';
+  }
+
+  if (!settingsFilled) fillSettings(s.settings, s.mtSymbol);
+  renderCharts(s);
+}
+
+function fillSettings(st, mtSym) {
+  for (const k of ['amount', 'tp', 'sl', 'rsiBuy', 'rsiSell']) $('s_' + k).value = st[k];
+  if (mtSym) {
+    $('s_mtSymbol').value = mtSym;
+    $('k_mtsym').value = mtSym;
+  }
+  settingsFilled = true;
+}
+
+// ---------- Aksi ----------
+let loading = false;
+async function load(silent) {
+  if (loading) return;
+  loading = true;
+  try {
+    const j = await api('status');
+    render(j.data);
+  } catch (e) {
+    $('updated').textContent = 'gagal memuat';
+    if (!silent) toast(e.message, 'err');
+  }
+  loading = false;
+}
+
+async function act(btn, fn) {
+  const all = document.querySelectorAll('.btn');
+  all.forEach((b) => (b.disabled = true));
+  try {
+    const j = await fn();
+    toast(j.message || 'Berhasil', 'ok');
+    haptic('success');
+    settingsFilled = false;
+    await load(true);
+  } catch (e) {
+    if (e.message !== 'Dibatalkan') {
+      toast(e.message, 'err');
+      haptic('error');
+    }
+  }
+  all.forEach((b) => (b.disabled = false));
+}
+
+$('btnBuy').addEventListener('click', () => act('buy', async () => {
+  if (!(await confirmBox('Eksekusi BUY market order sekarang?'))) throw new Error('Dibatalkan');
+  return api('buy', 'POST');
+}));
+$('btnSell').addEventListener('click', () => act('sell', async () => {
+  if (!(await confirmBox('Tutup seluruh posisi aktif sekarang?'))) throw new Error('Dibatalkan');
+  return api('sell', 'POST');
+}));
+$('btnAuto').addEventListener('click', () => act('auto', () =>
+  api('auto', 'POST', { on: !$('autoPill').classList.contains('on') })));
+
+$('btnQuickSwitch').addEventListener('click', () => act('switch', async () => {
+  const j = await api('broker', 'POST', {
+    broker: selectedBrokerForm,
+    mtSymbol: $('k_mtsym').value.trim(),
+  });
+  manualShowSetup = false;
+  return j;
+}));
+
+$('btnKeys').addEventListener('click', () => act('keys', async () => {
+  const meta = BROKER_META[selectedBrokerForm];
+  const payload = { broker: selectedBrokerForm };
+  if (meta.isMt) {
+    payload.token = $('k_token').value.trim();
+    payload.accountId = $('k_accid').value.trim();
+    payload.region = $('k_region').value;
+    payload.mtSymbol = $('k_mtsym').value.trim() || 'BTCUSD';
+  } else {
+    payload.apiKey = $('k_api').value.trim();
+    payload.secret = $('k_secret').value.trim();
+  }
+  const j = await api('keys', 'POST', payload);
+  $('k_api').value = '';
+  $('k_secret').value = '';
+  $('k_token').value = '';
+  manualShowSetup = false;
+  return j;
+}));
+
+$('btnDelKeys').addEventListener('click', () => act('delkeys', async () => {
+  if (!(await confirmBox('Hapus kredensial broker aktif dan matikan Auto-Trade?'))) throw new Error('Dibatalkan');
+  return api('keys', 'DELETE');
+}));
+$('btnSend').addEventListener('click', () => act('send', () => api('send-status', 'POST')));
+$('btnSave').addEventListener('click', () => act('save', () => api('settings', 'POST', {
+  amount: $('s_amount').value,
+  tp: $('s_tp').value,
+  sl: $('s_sl').value,
+  rsiBuy: $('s_rsiBuy').value,
+  rsiSell: $('s_rsiSell').value,
+  mtSymbol: $('s_mtSymbol').value.trim(),
+})));
+
+// ---------- Tab menu ----------
+document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click', () => {
+  document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('active', x === b));
+  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.id === 'tab-' + b.dataset.tab));
+  window.scrollTo(0, 0);
+  if (b.dataset.tab === 'chart') [priceChart, rsiChart, pnlChart].forEach((c) => c.resize());
+  try { tg && tg.HapticFeedback && tg.HapticFeedback.selectionChanged(); } catch (e) {}
+}));
+
+load();
+setInterval(() => { if (!document.hidden) load(true); }, 15000);
+</script>
+</body>
+</html>
