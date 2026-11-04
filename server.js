@@ -30,12 +30,18 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || '7706512451,8821716544')
   .filter(Boolean);
 const isAdminId = (id) => ADMIN_IDS.includes(String(id || '').trim());
 
-const DEFAULT_ADMIN_PIN_HASHES = [
-  '5ed4fb3310b651ead0153f942016f35eb42f2b45d7552fdd30bb4e5dd254b3d6',
-  '48e1e8f50e15f6ef5855fa31d7024809a00ea5e4fbb422f0f7cba9a755b84f8d',
+const sha256Hex = (v) => crypto.createHash('sha256').update(String(v)).digest('hex');
+// PIN Eksekutif Admin (utama) = 270223 ; PIN cadangan saat Face Scan gagal = 20052007.
+// Disimpan sebagai hash. Bisa ditambah lewat env ADMIN_PIN / ADMIN_FALLBACK_PIN.
+const MAIN_ADMIN_PIN_HASHES = [
   '3f85f14582604240238d1f15659d23eae027664aefe5617e2042dd788f6f14e9',
-  crypto.createHash('sha256').update(String(process.env.ADMIN_PIN || '123456')).digest('hex'),
+  ...(process.env.ADMIN_PIN ? [sha256Hex(process.env.ADMIN_PIN)] : []),
 ];
+const FALLBACK_ADMIN_PIN_HASHES = [
+  '5ed4fb3310b651ead0153f942016f35eb42f2b45d7552fdd30bb4e5dd254b3d6',
+  ...(process.env.ADMIN_FALLBACK_PIN ? [sha256Hex(process.env.ADMIN_FALLBACK_PIN)] : []),
+];
+const adminPinFails = new Map(); // id admin -> { n, until }
 
 const DEFAULT_RENTAL_CONFIG = {
   _id: 'rental_config',
@@ -688,6 +694,21 @@ const pubLive = makeBinance({}, false);
 
 // ---------- Penyimpanan (MongoDB) ----------
 let usersCol = null;
+let logsCol = null;
+// Catatan aktivitas (login, daftar, trade, sewa, aksi admin). Otomatis dihapus setelah 90 hari.
+function logActivity(type, userId, name, detail, extra) {
+  if (!logsCol) return;
+  logsCol
+    .insertOne({
+      time: new Date(),
+      type,
+      userId: String(userId || ''),
+      name: String(name || ''),
+      detail: String(detail || '').slice(0, 300),
+      extra: extra || null,
+    })
+    .catch(() => {});
+}
 let tradesCol = null;
 let configCol = null;
 let rentalsCol = null;
@@ -843,6 +864,13 @@ async function saveRentalConfig() {
 
 function logTrade(u, side, price, amount, pnl, note) {
   const info = getUserTradeInfo(u);
+  logActivity(
+    side === 'BUY' ? 'TRADE_BUY' : 'TRADE_SELL',
+    u._id,
+    u.name,
+    `${side} ${info.symbol} @ ${Number(price)} x ${Number(amount)}` + (side === 'SELL' ? ` · PnL ${Number(pnl)}` : ''),
+    { pnl: Number(pnl), price: Number(price), amount: Number(amount), asset: u.asset, broker: u.broker, note: String(note || '') }
+  );
   tradesCol
     .insertOne({
       userId: u._id,
@@ -880,6 +908,7 @@ async function ensureUser(from) {
   u = newUser(from);
   users.set(id, u);
   await usersCol.insertOne(u).catch((e) => console.error('Insert user:', e.message));
+  logActivity('REGISTER', id, u.name, 'Akun baru terdaftar' + (u.username ? ' (@' + u.username + ')' : ''));
   return u;
 }
 
@@ -1435,6 +1464,8 @@ async function sellPosition(u, note) {
   const pnl = Number.isFinite(res.pnl) ? Number(res.pnl) : (price - pos.entry) * qty * (pos.contractSize || 1);
 
   u.realizedPnl += pnl;
+  if (pnl >= 0) { u.wins = (u.wins || 0) + 1; u.grossProfit = (u.grossProfit || 0) + pnl; }
+  else { u.losses = (u.losses || 0) + 1; u.grossLoss = (u.grossLoss || 0) + pnl; }
   ensureToday(u);
   u.today.trades++;
   u.today.pnl += pnl;
@@ -1695,7 +1726,10 @@ async function approveRentalOrder(orderId, adminUserId) {
   const baseTime = Math.max(Date.now(), Number(u.rentalExpiresAt) || 0);
   u.rentalExpiresAt = baseTime + addMs;
   u.rentalPlanName = ord.packageName || 'Paket Sewa';
+  u.purchasedAt = Date.now();
+  u.purchaseCount = (u.purchaseCount || 0) + 1;
   saveUser(u);
+  logActivity('RENTAL_APPROVED', u._id, u.name, `Sewa ${ord.packageName} (${ord.durationHours} jam · ${ord.price}) disetujui oleh ${adminUserId || 'SYSTEM'}`, { orderId: String(ord._id || orderId), price: ord.price });
 
   ord.status = 'approved';
   ord.approvedBy = String(adminUserId || 'SYSTEM');
@@ -2238,6 +2272,7 @@ app.post('/api/rental/order', async (req, res) => {
       createdAt: Date.now(),
     };
     rentalOrders.set(orderId, ord);
+    logActivity('RENTAL_ORDER', u._id, u.name, `Mengajukan sewa ${pkg.name} (${pkg.price}) via ${pm.name}`, { orderId });
     if (rentalsCol) {
       await rentalsCol.insertOne(ord).catch(() => {});
     }
@@ -2299,10 +2334,8 @@ app.post('/api/auth/login', async (req, res) => {
       u = await ensureUser(tgUser);
     } else {
       const ident = String(body.identifier || '').trim();
+      // Login manual (tanpa Telegram): hanya untuk akun yang SUDAH ada. Tidak membuat akun baru dari ID sembarang.
       u = findUserByIdentifier(ident);
-      if (!u && /^\d{5,15}$/.test(ident)) {
-        u = await ensureUser({ id: ident, first_name: 'Trader ' + ident.slice(-4) });
-      }
     }
     if (!u) {
       return res.status(404).json({
@@ -2321,12 +2354,20 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     const pin = String(body.pin || '').trim();
-    if (u.pinHash) {
+    if (tgUser) {
+      // Identitas sudah terbukti dari Telegram (tanda tangan initData): PIN tidak wajib.
+      if (!u.pinHash && pin && pin.length >= 4) u.pinHash = hashPin(pin, u._id);
+    } else {
+      // Tanpa Telegram, PIN wajib. Akun tanpa PIN tidak bisa dimasuki lewat ID (cegah pengambilalihan akun).
+      if (!u.pinHash) {
+        return res.status(403).json({
+          ok: false,
+          error: 'Akun ini belum punya PIN. Buka Mini App lewat tombol Dashboard di bot Telegram agar ID terbaca otomatis.',
+        });
+      }
       if (!pin || hashPin(pin, u._id) !== u.pinHash) {
         return res.status(401).json({ ok: false, error: 'Password / PIN Login tidak sesuai' });
       }
-    } else if (pin && pin.length >= 4) {
-      u.pinHash = hashPin(pin, u._id);
     }
 
     const hasNewCreds = (body.apiKey && body.secret) || (body.token && body.accountId);
@@ -2339,6 +2380,7 @@ app.post('/api/auth/login', async (req, res) => {
 
     u.isSessionLocked = false;
     u.lastLoginAt = Date.now();
+    logActivity('LOGIN', u._id, u.name, 'Login Mini App');
     saveUser(u);
 
     const info = getUserTradeInfo(u);
@@ -2385,6 +2427,11 @@ app.use('/api', async (req, res, next) => {
 
 const h = (fn, allowWhenLocked = false) => async (req, res) => {
   try {
+    // Catat saat user membuka Mini App (maks. sekali per 6 jam)
+    if (req.user && Date.now() - (req.user.lastSeenAt || 0) > 6 * 3600 * 1000) {
+      req.user.lastSeenAt = Date.now();
+      logActivity('OPEN', req.user._id, req.user.name, 'Membuka Mini App');
+    }
     if (!allowWhenLocked && (req.user.isSessionLocked || !isRentalActive(req.user))) {
       return res.status(401).json({
         ok: false,
@@ -2428,12 +2475,25 @@ app.post(
     async (u, req) => {
       requireAdmin(u);
       const pinVal = String((req.body && req.body.pin) || '').trim();
-      const sha = crypto.createHash('sha256').update(pinVal).digest('hex');
-      const customHashes = rentalConfig.adminPinHashes || [];
-      if (!DEFAULT_ADMIN_PIN_HASHES.includes(sha) && !customHashes.includes(sha) && pinVal !== '123456') {
-        throw new Error('PIN Eksekutif Admin tidak sesuai');
+      const kind = req.body && req.body.kind === 'fallback' ? 'fallback' : 'main';
+      const rec = adminPinFails.get(String(u._id)) || { n: 0, until: 0 };
+      if (Date.now() < rec.until) {
+        throw new Error('Terlalu banyak salah. Coba lagi dalam ' + Math.ceil((rec.until - Date.now()) / 1000) + ' detik');
       }
-      return { message: 'PIN Admin Terverifikasi', pinHash: sha };
+      const sha = sha256Hex(pinVal);
+      const allowed = kind === 'fallback'
+        ? FALLBACK_ADMIN_PIN_HASHES
+        : [...MAIN_ADMIN_PIN_HASHES, ...(rentalConfig.adminPinHashes || [])];
+      if (!pinVal || !allowed.includes(sha)) {
+        rec.n += 1;
+        if (rec.n >= 5) { rec.n = 0; rec.until = Date.now() + 60000; }
+        adminPinFails.set(String(u._id), rec);
+        logActivity('ADMIN_PIN_FAIL', u._id, u.name, `PIN ${kind === 'fallback' ? 'cadangan' : 'utama'} salah`);
+        throw new Error(kind === 'fallback' ? 'PIN cadangan tidak sesuai' : 'PIN Eksekutif Admin tidak sesuai');
+      }
+      adminPinFails.delete(String(u._id));
+      logActivity('ADMIN_PIN_OK', u._id, u.name, `PIN ${kind === 'fallback' ? 'cadangan' : 'utama'} benar`);
+      return { message: 'PIN Admin Terverifikasi' };
     },
     true
   )
@@ -2456,14 +2516,103 @@ app.get(
         rentalExpiresAt: usr.rentalExpiresAt || 0,
         rentalPlanName: usr.rentalPlanName || '',
         realizedPnl: usr.realizedPnl || 0,
+        wins: usr.wins || 0,
+        losses: usr.losses || 0,
+        grossProfit: usr.grossProfit || 0,
+        grossLoss: usr.grossLoss || 0,
+        todayPnl: usr.today && usr.today.pnl ? usr.today.pnl : 0,
+        purchasedAt: usr.purchasedAt || 0,
+        purchaseCount: usr.purchaseCount || 0,
+        createdAt: usr.createdAt ? new Date(usr.createdAt).getTime() : 0,
+        lastLoginAt: usr.lastLoginAt || 0,
+        hasPosition: !!usr.position,
       }));
+      const summary = {
+        totalUsers: userList.length,
+        activeRentals: userList.filter((x) => x.rentalActive).length,
+        autoOn: userList.filter((x) => x.isAutoTrade).length,
+        totalPnl: userList.reduce((a, x) => a + x.realizedPnl, 0),
+        totalProfit: userList.reduce((a, x) => a + x.grossProfit, 0),
+        totalLoss: userList.reduce((a, x) => a + x.grossLoss, 0),
+        totalWins: userList.reduce((a, x) => a + x.wins, 0),
+        totalLosses: userList.reduce((a, x) => a + x.losses, 0),
+      };
       const orders = [...rentalOrders.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 50);
       return {
         rentalConfig,
         users: userList,
+        summary,
         orders,
         serverUtc: utcTimeStr(),
       };
+    },
+    true
+  )
+);
+
+app.get(
+  '/api/admin/logs',
+  h(
+    async (u, req) => {
+      requireAdmin(u);
+      if (!logsCol) return { logs: [] };
+      const q = {};
+      const type = String(req.query.type || '');
+      if (type === 'trade') q.type = /^TRADE_/;
+      else if (type === 'rental') q.type = /^RENTAL_/;
+      else if (type === 'login') q.type = { $in: ['LOGIN', 'REGISTER', 'OPEN', 'KEYS'] };
+      else if (type === 'admin') q.type = /^ADMIN_/;
+      if (req.query.userId) q.userId = String(req.query.userId);
+      const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 60));
+      const rows = await logsCol.find(q).sort({ time: -1 }).limit(limit).toArray();
+      return {
+        logs: rows.map((r) => ({
+          id: String(r._id),
+          t: new Date(r.time).getTime(),
+          type: r.type,
+          userId: r.userId,
+          name: r.name,
+          detail: r.detail,
+          pnl: r.extra && Number.isFinite(r.extra.pnl) ? r.extra.pnl : null,
+        })),
+      };
+    },
+    true
+  )
+);
+
+app.get(
+  '/api/admin/user-trades',
+  h(
+    async (u, req) => {
+      requireAdmin(u);
+      const uid = String(req.query.userId || '');
+      if (!uid) throw new Error('userId wajib');
+      const rows = await tradesCol.find({ userId: uid }).sort({ time: -1 }).limit(30).toArray();
+      return {
+        trades: rows.map((r) => ({
+          t: new Date(r.time).getTime(), side: r.side, symbol: r.symbol, price: r.price, amount: r.amount, pnl: r.pnl, note: r.note,
+        })),
+      };
+    },
+    true
+  )
+);
+
+// Hasil face scan admin dicatat sebagai jejak audit
+app.post(
+  '/api/admin/audit',
+  h(
+    async (u, req) => {
+      requireAdmin(u);
+      const ev = String((req.body && req.body.event) || '');
+      const map = {
+        FACE_OK: ['ADMIN_FACE_OK', 'Face scan cocok, panel admin dibuka'],
+        FACE_FAIL: ['ADMIN_FACE_FAIL', 'Face scan gagal'],
+        FALLBACK_OK: ['ADMIN_FALLBACK_OK', 'Panel admin dibuka lewat PIN cadangan'],
+      };
+      if (map[ev]) logActivity(map[ev][0], u._id, u.name, map[ev][1]);
+      return { message: 'ok' };
     },
     true
   )
@@ -2528,6 +2677,7 @@ app.post(
         if (rentalsCol) await rentalsCol.replaceOne({ _id: ord._id }, ord, { upsert: true }).catch(() => {});
         const targetU = users.get(String(ord.userId));
         if (targetU) notify(targetU, `✕ Pengajuan sewa (${esc(ord.packageName)}) ditolak oleh Admin.`);
+        logActivity('RENTAL_REJECTED', ord.userId, ord.userName, `Pengajuan ${ord.packageName} ditolak oleh ${u._id}`, { orderId: String(orderId) });
         return { message: `Pesanan ${orderId} ditolak` };
       }
       if (action === 'grant') {
@@ -2542,7 +2692,9 @@ app.post(
         const base = Math.max(Date.now(), Number(targetU.rentalExpiresAt) || 0);
         targetU.rentalExpiresAt = base + addH * 3600 * 1000;
         targetU.rentalPlanName = planName || `Aktif Manual (+${addH} Jam)`;
+        targetU.purchasedAt = Date.now();
         saveUser(targetU);
+        logActivity('RENTAL_GRANT', targetU._id, targetU.name, `Admin ${u._id} menambah sewa +${addH} jam`, { hours: addH });
         notify(
           targetU,
           `✦ <b>MASA SEWA DITAMBAHKAN ADMIN</b>\n` +
@@ -2560,6 +2712,7 @@ app.post(
         targetU.rentalPlanName = 'Berakhir / Dicabut';
         targetU.isAutoTrade = false;
         saveUser(targetU);
+        logActivity('RENTAL_REVOKE', targetU._id, targetU.name, `Sewa dicabut oleh admin ${u._id}`);
         notify(targetU, `⚠︎ Masa sewa bot Anda telah dihentikan oleh Admin. Auto-Trade dimatikan.`);
         return { message: `Masa sewa user ${targetU._id} berhasil dicabut` };
       }
@@ -2646,6 +2799,7 @@ app.post(
   h(async (u, req) => {
     const res = await saveKeys(u, req.body || {});
     u.lastLoginAt = Date.now();
+    logActivity('KEYS', u._id, u.name, `Menyimpan kredensial ${getBrokerCfg(res.broker).name}`);
     saveUser(u);
     const cfg = getBrokerCfg(res.broker);
     return { message: `${cfg.name} berhasil terhubung ●` };
@@ -2843,6 +2997,10 @@ let mongoClient = null;
     tradesCol = db.collection('trades');
     configCol = db.collection('config');
     rentalsCol = db.collection('rentals');
+    logsCol = db.collection('activity_logs');
+    await logsCol.createIndex({ time: -1 });
+    await logsCol.createIndex({ userId: 1, time: -1 });
+    await logsCol.createIndex({ time: 1 }, { expireAfterSeconds: 90 * 86400 }).catch(() => {});
     await tradesCol.createIndex({ userId: 1, time: -1 });
     await usersCol.createIndex({ isAutoTrade: 1 });
     await rentalsCol.createIndex({ userId: 1, createdAt: -1 });
