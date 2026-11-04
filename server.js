@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const zlib = require('zlib');
 const express = require('express');
 const ccxt = require('ccxt');
-const { RSI } = require('technicalindicators');
+const { RSI, MACD, BollingerBands, EMA } = require('technicalindicators');
 const TelegramBot = require('node-telegram-bot-api');
 const { MongoClient } = require('mongodb');
 const mt5Adapter = require('./mt5');
@@ -21,7 +21,7 @@ const MAX_AUTO_FAILS = 5;
 const WORKER_CONCURRENCY = Number(process.env.WORKER_CONCURRENCY || 8);
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MARKET_CACHE_TTL_MS = 2000; // cache pasar 2 detik untuk update realtime
-const DEFAULT_SETTINGS = { amount: 0.001, tp: 1.0, sl: 0.7, rsiBuy: 30, rsiSell: 70 };
+const DEFAULT_SETTINGS = { amount: 0.001, tp: 1.0, sl: 0.7, rsiBuy: 30, rsiSell: 70, maxLossStreak: 0, breakEvenPct: 0, trailAtr: 0, strategy: 'rsi', trendFilter: 0, dailyLossLimit: 0, sessionOn: 0, sessionStart: 7, sessionEnd: 21, humanize: 1 };
 
 // ID Admin Khusus sesuai permintaan user
 const ADMIN_IDS = (process.env.ADMIN_IDS || '7706512451,8821716544')
@@ -50,46 +50,45 @@ const DEFAULT_RENTAL_CONFIG = {
   instructions:
     'Pilih paket sewa di bawah, lakukan pembayaran sesuai harga paket ke salah satu metode pembayaran resmi, lalu isi Bukti Transfer / TxHash dan klik Kirim Pembayaran Sewa.',
   packages: [
-    {
-      id: 'pkg_1d',
-      name: 'Paket Harian (1 Hari)',
-      price: '5 USDT',
-      durationHours: 24,
-      desc: 'Akses Penuh Login & Auto-Trade 24 Jam',
-    },
-    {
-      id: 'pkg_7d',
-      name: 'Paket Mingguan (7 Hari)',
-      price: '25 USDT',
-      durationHours: 168,
-      desc: 'Akses Multi-Broker & Multi-Aset 7 Hari',
-    },
-    {
-      id: 'pkg_30d',
-      name: 'Paket Bulanan VIP (30 Hari)',
-      price: '75 USDT',
-      durationHours: 720,
-      desc: 'Full Fitur + Prioritas Server 30 Hari',
-    },
+    { id: 'pkg_trial', tier: 'starter', trial: true, name: 'Uji Coba Trade (1 Hari)', price: 'GRATIS', discountPrice: '', durationHours: 24,
+      desc: 'Gratis 1 hari · 1 kali per IP · fitur Starter' },
+    { id: 'pkg_1d', tier: 'starter', name: 'Starter (1 Hari)', price: '5 USDT', discountPrice: '', durationHours: 24,
+      desc: '1 aset · Auto-trade RSI · maks 5 transaksi/hari' },
+    { id: 'pkg_7d', tier: 'trader', name: 'Trader (7 Hari)', price: '25 USDT', discountPrice: '', durationHours: 168,
+      desc: 'Sampai 3 aset · semua grafik · maks 20 transaksi/hari' },
+    { id: 'pkg_30d', tier: 'pro', name: 'Pro (30 Hari)', price: '75 USDT', discountPrice: '', durationHours: 720,
+      desc: 'Semua aset & MT4/MT5 · tanpa batas transaksi' },
+    { id: 'pkg_365d', tier: 'elite', name: 'Elite VIP (365 Hari)', price: '900 USDT', discountPrice: '580 USDT', durationHours: 8760,
+      desc: 'Semua fitur Pro + fitur eksklusif Elite' },
   ],
   paymentMethods: [
+    {
+      id: 'pm_paypal',
+      name: 'PayPal',
+      account: '',
+      holder: 'AFEX Official',
+      country: 'ALL',
+    },
     {
       id: 'pm_bep20',
       name: 'USDT (Jaringan BEP20 / BSC)',
       account: '0x8F9c3b7A12dE4567890aBcDeF1234567890AbCdE',
       holder: 'AFEX Official Treasury',
+      country: 'ALL',
     },
     {
       id: 'pm_trc20',
       name: 'USDT (Jaringan TRC20 / TRON)',
       account: 'TQn9Y2khEsLJW1ChVWFMSMeRDow5KcbLSE',
       holder: 'AFEX Official Treasury',
+      country: 'ALL',
     },
     {
       id: 'pm_bank',
       name: 'Transfer Bank / E-Wallet (IDR)',
       account: 'BCA 8820194821 / DANA 081234567890',
       holder: 'A/N Admin AFEX Trade',
+      country: 'ID',
     },
   ],
 };
@@ -695,6 +694,7 @@ const pubLive = makeBinance({}, false);
 // ---------- Penyimpanan (MongoDB) ----------
 let usersCol = null;
 let logsCol = null;
+let csCol = null;
 // Catatan aktivitas (login, daftar, trade, sewa, aksi admin). Otomatis dihapus setelah 90 hari.
 function logActivity(type, userId, name, detail, extra) {
   if (!logsCol) return;
@@ -749,6 +749,163 @@ function isRentalActive(u) {
   if (isAdminId(u._id)) return true;
   if (!rentalConfig.requireRental) return true;
   return Number(u.rentalExpiresAt || 0) > Date.now();
+}
+
+// ---------- Paket / Tier ----------
+const TIER_LIMITS = {
+  starter: { label: 'Starter', maxAssets: 1, maxTradesPerDay: 5 },
+  trader: { label: 'Trader', maxAssets: 3, maxTradesPerDay: 20 },
+  pro: { label: 'Pro', maxAssets: 0, maxTradesPerDay: 0 }, // 0 = tanpa batas
+  elite: { label: 'Elite', maxAssets: 0, maxTradesPerDay: 0 },
+};
+// Fitur yang tampil di Mini App sesuai paket. Paket Starter = hanya fitur trade inti.
+const TIER_FEATURES = {
+  starter: ['trade', 'humanize'],
+  trader: ['trade', 'humanize', 'chart', 'analysis', 'trader_tools'],
+  pro: ['trade', 'humanize', 'chart', 'analysis', 'trader_tools', 'pro_tools'],
+  elite: ['trade', 'humanize', 'chart', 'analysis', 'trader_tools', 'pro_tools', 'alarm'],
+};
+const hasPurchased = (u) => isAdminId(u._id) || Number(u.purchaseCount || 0) > 0;
+function featuresFor(u) {
+  const base = TIER_FEATURES[getUserTier(u)] || TIER_FEATURES.starter;
+  return hasPurchased(u) ? [...base, 'cs'] : [...base]; // 'cs' = chat customer service, hanya pembeli (bukan uji coba)
+}
+const hasFeature = (u, f) => featuresFor(u).includes(f);
+function inferTier(p) {
+  if (p && TIER_LIMITS[p.tier]) return p.tier;
+  const h = Number(p && p.durationHours) || 24;
+  return h >= 8000 ? 'elite' : h >= 600 ? 'pro' : h >= 100 ? 'trader' : 'starter';
+}
+function getUserTier(u) {
+  if (isAdminId(u._id)) return 'elite';
+  return TIER_LIMITS[u.rentalTier] ? u.rentalTier : 'pro'; // user lama tanpa tier = Pro
+}
+function getPlanLimits(u) {
+  return TIER_LIMITS[getUserTier(u)];
+}
+function effectivePrice(p) {
+  const d = String((p && p.discountPrice) || '').trim();
+  return d || String((p && p.price) || '');
+}
+function utcDayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+function tradesToday(u) {
+  return u.tradeDay === utcDayKey() ? Number(u.tradeCount) || 0 : 0;
+}
+
+// ---------- Strategi entry / exit ----------
+const STRATEGIES = { rsi: 'RSI Standar', ema_rsi: 'EMA + RSI', macd: 'MACD', bollinger: 'Bollinger Bands' };
+function lastOf(arr, back = 0) {
+  return arr && arr.length > back ? arr[arr.length - 1 - back] : undefined;
+}
+function strategySignals(m, rsiBuy, rsiSell, strategy) {
+  const closes = (m && m.closes) || [];
+  const price = m.price;
+  const out = { buy: false, sell: false, why: '' };
+  if (strategy === 'ema_rsi') {
+    const e9 = EMA.calculate({ values: closes, period: 9 });
+    const e21 = EMA.calculate({ values: closes, period: 21 });
+    const f = lastOf(e9), sl = lastOf(e21);
+    if (!Number.isFinite(f) || !Number.isFinite(sl)) return out;
+    out.buy = f > sl && m.rsi < Math.min(rsiSell - 10, rsiBuy + 20);
+    out.sell = f < sl && m.rsi > rsiBuy + 10;
+    out.why = `EMA9 ${f > sl ? '>' : '<'} EMA21 · RSI ${m.rsi.toFixed(1)}`;
+  } else if (strategy === 'macd') {
+    const mc = MACD.calculate({ values: closes, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, SimpleMAOscillator: false, SimpleMASignal: false });
+    const a = lastOf(mc), b = lastOf(mc, 1);
+    if (!a || !b || !Number.isFinite(a.histogram) || !Number.isFinite(b.histogram)) return out;
+    out.buy = b.histogram <= 0 && a.histogram > 0;   // golden cross
+    out.sell = b.histogram >= 0 && a.histogram < 0;  // death cross
+    out.why = `MACD hist ${a.histogram.toFixed(4)}`;
+  } else if (strategy === 'bollinger') {
+    const bb = BollingerBands.calculate({ values: closes, period: 20, stdDev: 2 });
+    const a = lastOf(bb);
+    if (!a) return out;
+    out.buy = price <= a.lower;
+    out.sell = price >= a.upper;
+    out.why = `Bollinger bawah ${a.lower.toFixed(4)} / atas ${a.upper.toFixed(4)}`;
+  }
+  return out;
+}
+// Filter tren: entry hanya bila EMA20 di atas EMA50 (tren naik)
+function trendIsUp(m) {
+  const closes = (m && m.closes) || [];
+  if (closes.length < 55) return true; // data kurang -> jangan memblokir
+  const e20 = lastOf(EMA.calculate({ values: closes, period: 20 }));
+  const e50 = lastOf(EMA.calculate({ values: closes, period: 50 }));
+  return !(Number.isFinite(e20) && Number.isFinite(e50)) || e20 > e50;
+}
+
+const isProUp = (u) => ['pro', 'elite'].includes(getUserTier(u));
+const isElite = (u) => getUserTier(u) === 'elite';
+
+// ---------- Poin 6 (Elite): alarm harga ----------
+const MAX_ALARMS = 10;
+function alarmHit(a, price) {
+  if (!a || !Number.isFinite(price)) return false;
+  return a.dir === 'above' ? price >= a.level : price <= a.level;
+}
+function newAlarmId() {
+  return 'al_' + crypto.randomBytes(4).toString('hex');
+}
+function dailyLossHit(u) {
+  const dl = Number(u.settings && u.settings.dailyLossLimit) || 0;
+  if (!(dl > 0) || !isProUp(u)) return false;
+  ensureToday(u);
+  return u.today.pnl <= -dl;
+}
+function inSession(u) {
+  if (!isProUp(u) || Number(u.settings.sessionOn) !== 1) return true;
+  const h = new Date().getUTCHours();
+  const a = Number(u.settings.sessionStart), b = Number(u.settings.sessionEnd);
+  return a <= b ? h >= a && h < b : h >= a || h < b;
+}
+function computeStats(rows) {
+  const sells = rows.filter((r) => r.side === 'SELL' && Number.isFinite(Number(r.pnl)));
+  let cum = 0, peak = 0, maxDd = 0, gp = 0, gl = 0, wins = 0, losses = 0, best = null, worst = null;
+  const perAsset = {};
+  for (const r of sells) {
+    const p = Number(r.pnl);
+    cum += p;
+    peak = Math.max(peak, cum);
+    maxDd = Math.max(maxDd, peak - cum);
+    if (p >= 0) { wins++; gp += p; } else { losses++; gl += p; }
+    best = best === null ? p : Math.max(best, p);
+    worst = worst === null ? p : Math.min(worst, p);
+    const k = r.asset || r.symbol || '?';
+    perAsset[k] = perAsset[k] || { pnl: 0, trades: 0, wins: 0 };
+    perAsset[k].pnl += p; perAsset[k].trades++; if (p >= 0) perAsset[k].wins++;
+  }
+  const n = sells.length;
+  return {
+    trades: n, wins, losses,
+    winRate: n ? (wins / n) * 100 : 0,
+    totalPnl: cum, grossProfit: gp, grossLoss: gl,
+    profitFactor: gl < 0 ? gp / -gl : (gp > 0 ? null : 0),
+    avgWin: wins ? gp / wins : 0, avgLoss: losses ? gl / losses : 0,
+    best: best === null ? 0 : best, worst: worst === null ? 0 : worst,
+    maxDrawdown: maxDd,
+    perAsset: Object.entries(perAsset).map(([asset, v]) => ({ asset, ...v })).sort((a, b) => b.pnl - a.pnl),
+  };
+}
+const csvCell = (v) => {
+  const t = String(v === undefined || v === null ? '' : v);
+  const safe = /^[=+\-@]/.test(t) ? "'" + t : t; // cegah formula injection di Excel
+  return /[",\n]/.test(safe) ? '"' + safe.replace(/"/g, '""') + '"' : safe;
+};
+
+function calcAtr(m, period = 14) {
+  const h = (m && m.highs) || [], l = (m && m.lows) || [], c = (m && m.closes) || [];
+  const n = c.length;
+  if (n < period + 1) return 0;
+  let sum = 0;
+  for (let i = n - period; i < n; i++) {
+    const tr = Math.max(h[i] - l[i], Math.abs(h[i] - c[i - 1]), Math.abs(l[i] - c[i - 1]));
+    if (!Number.isFinite(tr)) return 0;
+    sum += tr;
+  }
+  return sum / period;
 }
 
 function getUserTradeInfo(u) {
@@ -822,6 +979,7 @@ function newUser(from) {
     history: {},
     settings: { ...DEFAULT_SETTINGS },
     lastSellAt: 0,
+    alarms: [],
   };
 }
 
@@ -835,6 +993,7 @@ function normalizeUserDoc(doc) {
     asset: ASSETS[doc.asset] ? doc.asset : 'BTC',
     brokerKeys: { ...(doc.brokerKeys || {}) },
     settings: { ...DEFAULT_SETTINGS, ...(doc.settings || {}) },
+    alarms: Array.isArray(doc.alarms) ? doc.alarms : [],
   };
   if (isAdminId(u._id)) {
     u.rentalExpiresAt = Date.now() + 100 * 365 * 86400000;
@@ -912,6 +1071,19 @@ async function ensureUser(from) {
   return u;
 }
 
+// ID/username dikunci ke akun Telegram: lewat Telegram identitas diambil dari initData (tidak bisa diganti),
+// di luar Telegram hanya ID angka yang diterima (bukan @username).
+function checkIdentLock(tgUser, ident) {
+  const q = String(ident || '').trim();
+  if (tgUser) {
+    if (!q) return null;
+    const un = String(tgUser.username || '').toLowerCase();
+    if (q === String(tgUser.id) || (un && q.replace(/^@/, '').toLowerCase() === un)) return null;
+    return 'ID terkunci sesuai akun Telegram Anda dan tidak bisa diganti.';
+  }
+  if (!/^\d{3,20}$/.test(q)) return 'Masukkan ID Telegram berupa angka. Username tidak bisa dipakai untuk login.';
+  return null;
+}
 function findUserByIdentifier(raw) {
   const q = String(raw || '').trim();
   if (!q) return null;
@@ -1136,6 +1308,27 @@ function buildMarketAnalysis(m, u, info) {
   };
 }
 
+// ---------- Mode Anti-Deteksi Bot (Humanize) · Starter, Trader, Pro, Elite ----------
+// Mengurangi pola khas bot: jeda acak sebelum order, ukuran lot sedikit bervariasi (tidak pernah melebihi
+// jumlah yang Anda atur), tanpa komentar/tag "bot" pada order, dan ID order acak. Ini TIDAK menjamin broker
+// tidak mendeteksi; pastikan aturan broker Anda mengizinkan trading otomatis.
+const HUMAN_DELAY_MS = [600, 3500];
+const humanizeOn = (u) => Number(u && u.settings && u.settings.humanize) !== 0;
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+async function humanPause(u) {
+  if (!humanizeOn(u)) return 0;
+  const ms = HUMAN_DELAY_MS[0] + Math.floor(Math.random() * (HUMAN_DELAY_MS[1] - HUMAN_DELAY_MS[0]));
+  await sleepMs(ms);
+  return ms;
+}
+function humanizeAmount(u, amount, minAmount) {
+  const a = Number(amount);
+  if (!humanizeOn(u) || !(a > 0)) return a;
+  const v = Number((a * (0.95 + Math.random() * 0.05)).toFixed(6));
+  return Math.min(a, Math.max(Number(minAmount) || 0, v));
+}
+const humanOrderId = () => crypto.randomBytes(9).toString('hex'); // 18 karakter acak, tanpa awalan khas bot
+
 // ---------- Adapter Broker Terpadu ----------
 function buildBinanceAdapter(apiKey, secret, sandbox) {
   const ex = makeBinance({ apiKey, secret }, sandbox);
@@ -1156,8 +1349,8 @@ function buildBinanceAdapter(apiKey, secret, sandbox) {
     async candles(s, tf, n) {
       return ex.fetchOHLCV(s, tf, undefined, n);
     },
-    async marketBuy(s, amount, baseAsset = 'BTC') {
-      let order = await ex.createMarketBuyOrder(s, amount);
+    async marketBuy(s, amount, baseAsset = 'BTC', opts = {}) {
+      let order = await ex.createMarketBuyOrder(s, amount, opts.humanize ? { newClientOrderId: humanOrderId() } : undefined);
       if (!order.filled && order.id) {
         try {
           order = await ex.fetchOrder(order.id, s);
@@ -1172,13 +1365,13 @@ function buildBinanceAdapter(apiKey, secret, sandbox) {
       const cost = Number(order.cost) || price * filled;
       return { price, filled: got, cost, contractSize: 1, positionId: order.id ? String(order.id) : null, symbol: s };
     },
-    async marketSell(s, amount, pos, baseAsset = 'BTC') {
+    async marketSell(s, amount, pos, baseAsset = 'BTC', opts = {}) {
       const b = await ex.fetchBalance();
       const free = b[baseAsset] ? Number(b[baseAsset].free) || 0 : 0;
       const target = pos && pos.amount ? Math.min(pos.amount, free) : free;
       const qty = Number(ex.amountToPrecision(s, target));
       if (!(qty > 0)) throw new Error(`Saldo ${baseAsset} tidak cukup untuk dijual`);
-      const order = await ex.createMarketSellOrder(s, qty);
+      const order = await ex.createMarketSellOrder(s, qty, opts.humanize ? { newClientOrderId: humanOrderId() } : undefined);
       const price = Number(order.average || order.price) || 0;
       const proceeds = Number(order.cost) || price * qty;
       const pnl = proceeds - (pos ? pos.cost : price * qty);
@@ -1327,6 +1520,7 @@ async function getPublicAssetMarket(assetId, sandbox = false) {
     }
     const fallback = generateFallbackCandles(a);
     entry.data = computeMarketFromCandles(fallback);
+    entry.data.simulated = true; // data cadangan buatan: jangan dipakai untuk alarm harga
     entry.at = Date.now();
     return entry.data;
   })().finally(() => {
@@ -1408,6 +1602,17 @@ async function buy(u, note) {
   if (!isRentalActive(u)) {
     throw new Error('Masa sewa akun Anda sudah berakhir. Silakan perpanjang paket sewa di menu Login.');
   }
+  const lim = getPlanLimits(u);
+  if (lim.maxTradesPerDay > 0 && tradesToday(u) >= lim.maxTradesPerDay) {
+    throw new Error(`Batas transaksi harian paket ${lim.label} tercapai (${lim.maxTradesPerDay}/hari, reset 00:00 UTC). Upgrade paket untuk menambah batas.`);
+  }
+  if (dailyLossHit(u)) {
+    throw new Error(`Batas rugi harian tercapai (${u.settings.dailyLossLimit}). Trading dihentikan sampai 00:00 UTC.`);
+  }
+  const slots0 = Array.isArray(u.assetSlots) ? u.assetSlots : [];
+  if (lim.maxAssets > 0 && !slots0.includes(u.asset) && slots0.length >= lim.maxAssets) {
+    throw new Error(`Paket ${lim.label} hanya boleh ${lim.maxAssets} aset. Upgrade paket untuk menambah aset.`);
+  }
   const info = getUserTradeInfo(u);
   if (!info.supportedOnBroker) {
     throw new Error(
@@ -1415,8 +1620,9 @@ async function buy(u, note) {
     );
   }
   const ad = requireAdapter(u);
-  const amount = Number(u.settings.amount) || info.defaultAmount;
-  const order = await ad.marketBuy(info.symbol, amount, info.base);
+  const amount = humanizeAmount(u, Number(u.settings.amount) || info.defaultAmount, info.minAmount);
+  await humanPause(u);
+  const order = await ad.marketBuy(info.symbol, amount, info.base, { humanize: humanizeOn(u) });
   const got = Number(order.filled) || amount;
   const m = await getMarketForUser(u);
   const price = Number(order.price) || m.price;
@@ -1448,6 +1654,12 @@ async function buy(u, note) {
   rt(u._id).balAt = 0;
   saveUser(u);
   logTrade(u, 'BUY', price, got, 0, note);
+  if (!Array.isArray(u.assetSlots)) u.assetSlots = [];
+  if (!u.assetSlots.includes(u.asset)) u.assetSlots.push(u.asset);
+  const dk = utcDayKey();
+  if (u.tradeDay !== dk) { u.tradeDay = dk; u.tradeCount = 0; }
+  u.tradeCount = (Number(u.tradeCount) || 0) + 1;
+  saveUser(u);
   return { price, got, unit: info.unit, symbol: pos.symbol, decimals: info.decimals };
 }
 
@@ -1457,7 +1669,8 @@ async function sellPosition(u, note) {
   const info = getUserTradeInfo(u);
   const ad = requireAdapter(u);
   const sym = pos.symbol || info.symbol;
-  const res = await ad.marketSell(sym, pos.amount, pos, info.base);
+  await humanPause(u);
+  const res = await ad.marketSell(sym, pos.amount, pos, info.base, { humanize: humanizeOn(u) });
   const m = await getMarketForUser(u);
   const price = Number(res.price) || m.price;
   const qty = Number(res.qty) || pos.amount;
@@ -1475,8 +1688,37 @@ async function sellPosition(u, note) {
   u.position = null;
   u.lastSellAt = Date.now();
   rt(u._id).balAt = 0;
+  u.lossStreak = pnl < 0 ? (Number(u.lossStreak) || 0) + 1 : 0;
+  const maxLS = Number(u.settings && u.settings.maxLossStreak) || 0;
+  let paused = false;
+  if (maxLS > 0 && u.isAutoTrade && u.lossStreak >= maxLS) {
+    u.isAutoTrade = false;
+    paused = true;
+  }
+  let dlPaused = false;
+  if (u.isAutoTrade && dailyLossHit(u)) { u.isAutoTrade = false; dlPaused = true; }
   saveUser(u);
   logTrade(u, 'SELL', price, qty, pnl.toFixed(4), note);
+  if (dlPaused) {
+    logActivity('DAILY_LOSS_STOP', u._id, u.name, `Auto-Trade berhenti: rugi harian ${Number(u.today.pnl).toFixed(4)} melewati batas ${u.settings.dailyLossLimit}`);
+    notify(
+      u,
+      `🛑 <b>BATAS RUGI HARIAN TERCAPAI</b>\n` +
+        `Rugi hari ini: <b>${Number(u.today.pnl).toFixed(4)}</b> (batas ${u.settings.dailyLossLimit}).\n` +
+        `Auto-Trade dihentikan sampai 00:00 UTC.`
+    );
+  }
+  if (paused) {
+    logActivity('AUTO_PAUSE', u._id, u.name, `Auto-Trade dijeda otomatis setelah ${u.lossStreak} loss beruntun`, { lossStreak: u.lossStreak });
+    notify(
+      u,
+      `⏸ <b>AUTO-TRADE DIJEDA OTOMATIS</b>\n` +
+        `Terjadi <b>${u.lossStreak}</b> loss beruntun (batas: ${maxLS}).\n` +
+        `Tinjau pengaturan Anda, lalu aktifkan Auto-Trade lagi secara manual bila siap.`
+    );
+    u.lossStreak = 0;
+    saveUser(u);
+  }
   return { price, qty, pnl, unit: info.unit, quote: info.quote, symbol: sym, decimals: info.decimals };
 }
 
@@ -1512,6 +1754,38 @@ const actionSell = (u, src) =>
     return r;
   });
 
+const actionPanic = (u) =>
+  withLock(u, async () => {
+    const wasAuto = !!u.isAutoTrade;
+    u.isAutoTrade = false;
+    rt(u._id).fails = 0;
+    saveUser(u);
+    let r = null;
+    let err = null;
+    if (u.position) {
+      try {
+        r = await sellPosition(u, 'DARURAT: tutup semua posisi');
+      } catch (e) {
+        err = e;
+      }
+    }
+    logActivity('PANIC', u._id, u.name, `Tombol darurat: auto-trade dimatikan${r ? `, posisi ditutup (PnL ${Number(r.pnl).toFixed(4)})` : ''}`, { wasAuto, closed: !!r });
+    if (err) {
+      await notify(u, `🚨 <b>DARURAT</b>: Auto-Trade dimatikan, tetapi posisi GAGAL ditutup:\n<code>${esc(err.message)}</code>\nTutup manual di broker Anda.`);
+      throw new Error(`Auto-Trade dimatikan, tetapi posisi gagal ditutup: ${err.message}`);
+    }
+    const info = getUserTradeInfo(u);
+    await notify(
+      u,
+      `🚨 <b>TOMBOL DARURAT</b>\nAuto-Trade: <b>NONAKTIF</b>\n` +
+        (r
+          ? `Posisi ${esc(r.symbol)} ditutup @ <code>${fmt(r.price, info.decimals)}</code>\n${dot(r.pnl)} PnL: <b>${sign(r.pnl, 4)} ${info.quote}</b>`
+          : `Tidak ada posisi terbuka.`) +
+        `\n◷ ${utcTimeStr()}`
+    );
+    return { r, wasAuto };
+  });
+
 function setAuto(u, on, src) {
   if (on && !isRentalActive(u)) {
     throw fail('Masa sewa belum aktif. Silakan aktifkan paket sewa di menu Login terlebih dahulu.', 'NORENTAL');
@@ -1535,6 +1809,11 @@ function selectAsset(u, assetId) {
   if (!ASSETS[cleanId]) throw new Error('Pilihan aset trade tidak valid');
   if (u.position && u.asset !== cleanId) {
     throw new Error(`Tutup posisi aktif di ${u.position.symbol || u.asset} dulu sebelum mengganti aset trade`);
+  }
+  const lim = getPlanLimits(u);
+  const slots = Array.isArray(u.assetSlots) ? u.assetSlots : [];
+  if (lim.maxAssets > 0 && !slots.includes(cleanId) && slots.length >= lim.maxAssets) {
+    throw new Error(`Paket ${lim.label} hanya boleh ${lim.maxAssets} aset (sudah dipakai: ${slots.join(', ')}). Upgrade paket untuk menambah aset.`);
   }
   const changed = u.asset !== cleanId;
   u.asset = cleanId;
@@ -1606,6 +1885,12 @@ function applySettings(u, input) {
     sl: [0.1, 20],
     rsiBuy: [5, 50],
     rsiSell: [50, 95],
+    maxLossStreak: [0, 10],
+    dailyLossLimit: [0, 1000000000],
+    sessionStart: [0, 23],
+    sessionEnd: [1, 24],
+    breakEvenPct: [0, 20],
+    trailAtr: [0, 10],
   };
   const out = { ...u.settings };
   for (const k of Object.keys(lim)) {
@@ -1615,6 +1900,38 @@ function applySettings(u, input) {
       throw new Error(`Nilai "${k}" harus antara ${lim[k][0]} dan ${lim[k][1]}`);
     }
     out[k] = v;
+  }
+  if (Number(out.maxLossStreak) > 0 && ['starter', 'trader'].includes(getUserTier(u))) {
+    throw new Error('Auto-pause setelah loss beruntun khusus paket Pro dan Elite. Upgrade paket untuk memakainya.');
+  }
+  if (input.sessionOn !== undefined && input.sessionOn !== '') {
+    out.sessionOn = input.sessionOn === true || Number(input.sessionOn) === 1 ? 1 : 0;
+  }
+  if ((Number(out.dailyLossLimit) > 0 || Number(out.sessionOn) === 1) && !['pro', 'elite'].includes(getUserTier(u))) {
+    throw new Error('Batas rugi harian dan jadwal jam trading khusus paket Pro dan Elite. Upgrade paket untuk memakainya.');
+  }
+  if (input.strategy !== undefined && input.strategy !== '') {
+    const st = String(input.strategy);
+    if (!STRATEGIES[st]) throw new Error('Strategi tidak dikenal');
+    out.strategy = st;
+  }
+  if (input.humanize !== undefined && input.humanize !== '') {
+    out.humanize = input.humanize === true || Number(input.humanize) === 1 ? 1 : 0;
+  }
+  if (input.trendFilter !== undefined && input.trendFilter !== '') {
+    out.trendFilter = input.trendFilter === true || Number(input.trendFilter) === 1 ? 1 : 0;
+  }
+  if (out.strategy && out.strategy !== 'rsi' && !['pro', 'elite'].includes(getUserTier(u))) {
+    throw new Error('Strategi ' + STRATEGIES[out.strategy] + ' khusus paket Pro dan Elite. Upgrade paket untuk memakainya.');
+  }
+  if (Number(out.trendFilter) === 1 && getUserTier(u) === 'starter') {
+    throw new Error('Filter tren khusus paket Trader ke atas. Upgrade paket untuk memakainya.');
+  }
+  if (Number(out.breakEvenPct) > 0 && getUserTier(u) === 'starter') {
+    throw new Error('Break-even otomatis khusus paket Trader ke atas. Upgrade paket untuk memakainya.');
+  }
+  if (Number(out.trailAtr) > 0 && ['starter', 'trader'].includes(getUserTier(u))) {
+    throw new Error('Trailing stop ATR khusus paket Pro dan Elite. Upgrade paket untuk memakainya.');
   }
   if (out.rsiBuy >= out.rsiSell) throw new Error('RSI beli harus lebih kecil dari RSI jual');
   u.settings = out;
@@ -1713,6 +2030,73 @@ function removeKeys(u) {
   notify(u, `✕ Kredensial ${getBrokerCfg(u.broker).name} dihapus dan Auto-Trade dimatikan.`, true);
 }
 
+// ---------- Password Login Otomatis (dibuat setelah pembayaran, dihapus saat sewa habis kecuali di-Keep / diperpanjang) ----------
+const PW_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const PW_GRACE_MS = 25 * 60 * 60 * 1000; // password dihapus 25 jam setelah peringatan (peringatan dikirim saat sewa habis)
+function genAutoPassword(len = 10) {
+  let out = '';
+  for (let i = 0; i < len; i++) out += PW_ALPHABET[crypto.randomInt(PW_ALPHABET.length)];
+  return out;
+}
+// Membuat password hanya bila user belum punya PIN. PIN buatan sendiri tidak pernah ditimpa / dihapus otomatis.
+function ensureAutoPassword(u) {
+  if (u.pinHash && u.pwAuto) {
+    u.pwWarned = false; // diperpanjang: password lama tetap dipakai
+    u.pwDeleteAt = 0;
+    return { created: false };
+  }
+  if (u.pinHash) return { created: false, manual: true };
+  const pw = genAutoPassword();
+  u.pinHash = hashPin(pw, u._id);
+  u.pwEnc = enc(pw);
+  u.pwAuto = true;
+  u.pwKeep = false;
+  u.pwWarned = false;
+  u.pwDeleteAt = 0;
+  u.pwCreatedAt = Date.now();
+  return { created: true, password: pw };
+}
+function revealAutoPassword(u) {
+  if (!u.pwAuto || !u.pwEnc) return null;
+  try { return dec(u.pwEnc); } catch (e) { return null; }
+}
+function pwKeepMarkup() {
+  const rows = [[btn('lock', 'Keep Password', { callback_data: 'pw_keep' }, 'success')]];
+  if (WEBAPP_URL) rows.push([btn('dash', 'Perpanjang Sewa', { web_app: { url: WEBAPP_URL } }, 'primary')]);
+  return { inline_keyboard: rows };
+}
+async function sweepAutoPasswords() {
+  const now = Date.now();
+  for (const u of users.values()) {
+    if (!u.pwAuto || !u.pinHash || isAdminId(u._id)) continue;
+    if (isRentalActive(u)) continue; // sewa aktif: tidak ada yang dihapus
+    if (u.pwKeep) continue; // di-Keep: dipertahankan
+    if (!u.pwWarned) {
+      // Sewa baru habis: kirim peringatan, password kedaluwarsa 25 jam kemudian
+      u.pwWarned = true;
+      u.pwDeleteAt = now + PW_GRACE_MS;
+      saveUser(u);
+      logActivity('PW_WARN', u._id, u.name, 'Peringatan password akan dihapus 25 jam lagi');
+      bot.sendMessage(
+        u._id,
+        `⏳ <b>Sewa Anda sudah habis</b>\nPassword login otomatis akan <b>kedaluwarsa dan DIHAPUS</b> pada <code>${utcTimeStr(u.pwDeleteAt)}</code> (25 jam dari sekarang).\nTekan <b>Keep Password</b> untuk menyimpannya, atau perpanjang sewa di Dashboard.`,
+        { parse_mode: 'HTML', reply_markup: pwKeepMarkup() }
+      ).catch(() => {});
+      continue;
+    }
+    if (now < Number(u.pwDeleteAt || 0)) continue;
+    u.pinHash = null;
+    u.pwEnc = null;
+    u.pwAuto = false;
+    u.pwWarned = false;
+    u.pwDeleteAt = 0;
+    saveUser(u);
+    logActivity('PW_AUTO_DELETED', u._id, u.name, 'Password login otomatis kedaluwarsa dan dihapus');
+    notify(u, `🗑 <b>Password login otomatis kedaluwarsa dan dihapus.</b>\nBeli/perpanjang paket sewa untuk mendapat password baru.`);
+  }
+}
+setInterval(() => { sweepAutoPasswords().catch((e) => console.error('Sweep password:', e.message)); }, 60 * 1000).unref();
+
 // ---------- Proses Sewa / Paket Langganan ----------
 async function approveRentalOrder(orderId, adminUserId) {
   const ord = rentalOrders.get(String(orderId));
@@ -1726,8 +2110,11 @@ async function approveRentalOrder(orderId, adminUserId) {
   const baseTime = Math.max(Date.now(), Number(u.rentalExpiresAt) || 0);
   u.rentalExpiresAt = baseTime + addMs;
   u.rentalPlanName = ord.packageName || 'Paket Sewa';
+  u.rentalTier = TIER_LIMITS[ord.tier] ? ord.tier : 'pro';
+  u.assetSlots = [];
   u.purchasedAt = Date.now();
   u.purchaseCount = (u.purchaseCount || 0) + 1;
+  const pwRes = ensureAutoPassword(u);
   saveUser(u);
   logActivity('RENTAL_APPROVED', u._id, u.name, `Sewa ${ord.packageName} (${ord.durationHours} jam · ${ord.price}) disetujui oleh ${adminUserId || 'SYSTEM'}`, { orderId: String(ord._id || orderId), price: ord.price });
 
@@ -1744,8 +2131,17 @@ async function approveRentalOrder(orderId, adminUserId) {
       `━━━━━━━━━━━━━━\n` +
       `📦 Paket: <b>${esc(ord.packageName)}</b> (${ord.durationHours} Jam)\n` +
       `◷ Aktif s/d: <code>${utcTimeStr(u.rentalExpiresAt)}</code>\n\n` +
-      `Silakan Login di Mini App untuk menyambungkan Bot ke akun Trading Anda.`
+      (pwRes.created
+        ? `🔑 <b>Password Login Anda:</b> <code>${esc(pwRes.password)}</code>\nSimpan baik-baik. Setelah sewa habis Anda dapat peringatan, lalu password dihapus 25 jam kemudian, kecuali Anda tekan Keep atau memperpanjang.\n\n`
+        : u.pwAuto
+          ? `🔑 Password login Anda tetap sama (bisa dilihat di Mini App > Login).\n\n`
+          : '') +
+      `Silakan Login di Mini App untuk menyambungkan Bot ke akun Trading Anda.`,
+    false
   );
+  if (pwRes.created && u.pwAuto) {
+    bot.sendMessage(u._id, 'Ingin password tetap disimpan setelah sewa habis?', { reply_markup: pwKeepMarkup() }).catch(() => {});
+  }
   return ord;
 }
 
@@ -1785,6 +2181,9 @@ async function snapshot(u) {
       pct: ((m.price - pos.entry) / pos.entry) * 100,
       tp: pos.entry * (1 + tp / 100),
       sl: pos.entry * (1 - sl / 100),
+      beArmed: !!pos.beArmed,
+      trailArmed: !!pos.trailArmed,
+      peak: Number.isFinite(pos.peak) ? pos.peak : null,
       unit: info.unit,
       symbol: pos.symbol || sym,
     };
@@ -1814,12 +2213,28 @@ async function snapshot(u) {
     username: u.username || '',
     isAdmin: isAdminId(u._id),
     hasPin: !!u.pinHash,
+    pwAuto: !!u.pwAuto,
+    pwKeep: !!u.pwKeep,
+    pwDeleteAt: Number(u.pwDeleteAt) || 0,
     isLoggedIn: !u.isSessionLocked && rentalActive && (hasKeys || !!u.lastLoginAt),
     isSessionLocked: !!u.isSessionLocked,
     liveBotStatus: u.liveBotStatus !== false,
     rentalActive,
     rentalExpiresAt: u.rentalExpiresAt || 0,
     rentalPlanName: u.rentalPlanName || '',
+    lossStreak: Number(u.lossStreak) || 0,
+    planTier: getUserTier(u),
+    features: featuresFor(u),
+    vip: isElite(u),
+    alarms: isElite(u) ? (u.alarms || []).map((a) => ({ id: a.id, asset: a.asset, level: a.level, dir: a.dir, createdAt: a.createdAt })) : [],
+    maxAlarms: MAX_ALARMS,
+    planLimits: {
+      label: getPlanLimits(u).label,
+      maxAssets: getPlanLimits(u).maxAssets,
+      maxTradesPerDay: getPlanLimits(u).maxTradesPerDay,
+      assetsUsed: (u.assetSlots || []).length,
+      tradesToday: tradesToday(u),
+    },
     rentalConfig: {
       requireRental: rentalConfig.requireRental,
       autoApprove: rentalConfig.autoApprove,
@@ -1910,6 +2325,7 @@ function statusText(u, s) {
 
   return (
     `◈ <b>${esc(s.symbol)}</b> · ${esc(s.brokerShort)} ${tw()}\n` +
+    (isElite(u) ? `✦ <b>VIP ELITE</b>\n` : '') +
     `━━━━━━━━━━━━━━\n` +
     `◆ Harga: <code>${fmt(s.price, dec)}</code>\n` +
     `∿ RSI(${RSI_PERIOD}): <code>${rsi ? rsi.toFixed(1) : '-'}</code> ${rsi ? rsiLabel(u, rsi) : ''}\n` +
@@ -2066,6 +2482,97 @@ async function refreshPanel(u, message, forceChartType) {
   }
 }
 
+// ---------- Chat Customer Service (khusus pembeli, bukan uji coba) ----------
+// Pesan dari Mini App diteruskan ke Admin lewat bot Telegram; Admin membalas dengan "Reply" pesan itu
+// (atau /balas <id> <teks>). Balasan tampil di Mini App dan juga dikirim ke chat bot user.
+const csChats = new Map();
+const csHits = new Map();
+setInterval(() => csHits.clear(), 60 * 1000).unref();
+const CS_MAX_LEN = 1000;
+function csAdd(userId, from, text) {
+  const msg = { _id: crypto.randomBytes(6).toString('hex'), userId: String(userId), from, text: String(text).slice(0, CS_MAX_LEN), at: Date.now() };
+  const arr = csChats.get(msg.userId) || [];
+  arr.push(msg);
+  if (arr.length > 200) arr.splice(0, arr.length - 200);
+  csChats.set(msg.userId, arr);
+  if (csCol) csCol.insertOne({ ...msg }).catch(() => {});
+  return msg;
+}
+const csList = (u) => (csChats.get(String(u._id)) || []).slice(-100).map((m) => ({ id: m._id, from: m.from, text: m.text, at: m.at }));
+function requireCs(u) {
+  if (!hasFeature(u, 'cs')) {
+    throw new Error('Chat Customer Service khusus pembeli paket (tidak tersedia untuk uji coba gratis).');
+  }
+}
+async function csFromUser(u, rawText) {
+  requireCs(u);
+  const text = String(rawText || '').trim();
+  if (!text) throw new Error('Tulis pesan terlebih dahulu.');
+  if (text.length > CS_MAX_LEN) throw new Error(`Pesan terlalu panjang (maks ${CS_MAX_LEN} karakter).`);
+  const n = (csHits.get(u._id) || 0) + 1;
+  csHits.set(u._id, n);
+  if (n > 10) throw new Error('Terlalu banyak pesan, tunggu sebentar.');
+  csAdd(u._id, 'user', text);
+  logActivity('CS_MSG', u._id, u.name, 'Mengirim chat ke Customer Service');
+  for (const admId of ADMIN_IDS) {
+    bot
+      .sendMessage(
+        admId,
+        `💬 <b>Chat Customer Service</b>\n` +
+          `Dari: <b>${esc(u.name)}</b>${u.username ? ' (@' + esc(u.username) + ')' : ''}\n` +
+          `ID: <code>${u._id}</code>\n` +
+          `Paket: ${esc(u.rentalPlanName || '-')}\n\n${esc(text)}\n\n` +
+          `↩︎ <i>Reply pesan ini untuk membalas, atau /balas ${u._id} teks</i>`,
+        { parse_mode: 'HTML' }
+      )
+      .catch(() => {});
+  }
+}
+async function csFromAdmin(adminId, targetId, rawText) {
+  const text = String(rawText || '').trim().slice(0, CS_MAX_LEN);
+  const t = users.get(String(targetId));
+  if (!t) return bot.sendMessage(adminId, `✕ User ${esc(targetId)} tidak ditemukan.`, { parse_mode: 'HTML' });
+  if (!text) return bot.sendMessage(adminId, '✕ Isi balasan kosong.');
+  csAdd(t._id, 'cs', text);
+  logActivity('CS_REPLY', t._id, t.name, `Dibalas CS oleh ${adminId}`);
+  await bot.sendMessage(t._id, `💬 <b>Customer Service:</b>\n${esc(text)}`, { parse_mode: 'HTML' }).catch(() => {});
+  return bot.sendMessage(adminId, `✓ Balasan terkirim ke <code>${t._id}</code> (${esc(t.name)}).`, { parse_mode: 'HTML' });
+}
+
+// Perintah /cs (user pembeli) dan /balas (admin), serta Reply admin pada pesan CS
+bot.onText(/^\/cs(@\w+)?(?:\s+([\s\S]+))?$/, async (msg, m) => {
+  if (msg.chat.type !== 'private') return;
+  const u = await ensureUser(msg.from);
+  if (!u) return;
+  try {
+    requireCs(u);
+    if (!m[2]) {
+      return bot.sendMessage(msg.chat.id, '💬 Kirim pesan ke Customer Service:\n<code>/cs tulis pesan Anda di sini</code>\nBalasan admin akan muncul di chat ini dan di Mini App > CS.', { parse_mode: 'HTML' });
+    }
+    await csFromUser(u, m[2]);
+    return bot.sendMessage(msg.chat.id, '✓ Pesan terkirim ke Customer Service. Balasan akan muncul di sini.');
+  } catch (e) {
+    return bot.sendMessage(msg.chat.id, `✕ ${esc(e.message)}`, { parse_mode: 'HTML' });
+  }
+});
+bot.onText(/^\/balas(@\w+)?\s+(\d+)\s+([\s\S]+)$/, async (msg, m) => {
+  if (msg.chat.type !== 'private' || !isAdminId(msg.from.id)) return;
+  await csFromAdmin(String(msg.from.id), m[2], m[3]);
+});
+bot.on('message', async (msg) => {
+  try {
+    if (!msg || msg.chat.type !== 'private' || !msg.text || /^\//.test(msg.text)) return;
+    if (!isAdminId(msg.from.id) || !msg.reply_to_message) return;
+    const src = String(msg.reply_to_message.text || '');
+    if (!/Chat Customer Service/.test(src)) return;
+    const idm = src.match(/ID:\s*(\d+)/);
+    if (!idm) return;
+    await csFromAdmin(String(msg.from.id), idm[1], msg.text);
+  } catch (e) {
+    console.error('CS reply:', e.message);
+  }
+});
+
 // ---------- Perintah & tombol Telegram ----------
 bot.onText(/^\/(menu|start|status|broker|asset|profit)(@\w+)?/, async (msg) => {
   if (msg.chat.type !== 'private') return;
@@ -2097,6 +2604,13 @@ bot.on('callback_query', async (q) => {
   const u = await ensureUser(q.from);
   if (!u) return;
   try {
+    if (q.data === 'pw_keep') {
+      if (!u.pwAuto) return notify(u, 'ℹ︎ Tidak ada password otomatis yang perlu disimpan.');
+      u.pwKeep = true;
+      saveUser(u);
+      logActivity('PW_KEEP', u._id, u.name, 'Password otomatis ditahan (Keep) via bot');
+      return notify(u, '✓ Password login Anda akan <b>disimpan</b> walau sewa habis. Bisa dibatalkan di Mini App > Login.');
+    }
     if (q.data && q.data.startsWith('adm_acc_')) {
       if (!isAdminId(u._id)) return notify(u, '✕ Khusus Admin Owner.');
       const ordId = q.data.replace('adm_acc_', '');
@@ -2221,6 +2735,8 @@ app.post('/api/rental/order', async (req, res) => {
   try {
     const body = req.body || {};
     const tgUser = verifyInitData(req.get('x-init-data'));
+    const lockErr = tgUser || String(body.identifier || '').trim() ? checkIdentLock(tgUser, body.identifier) : null;
+    if (lockErr) return res.status(403).json({ ok: false, error: lockErr });
     let u = null;
     if (tgUser) {
       u = await ensureUser(tgUser);
@@ -2245,6 +2761,9 @@ app.post('/api/rental/order', async (req, res) => {
     const pkg = (rentalConfig.packages || []).find((p) => p.id === body.packageId) || rentalConfig.packages[0];
     if (!pkg) return res.status(400).json({ ok: false, error: 'Paket sewa tidak ditemukan' });
 
+    if (pkg.trial) {
+      return res.status(400).json({ ok: false, error: 'Paket uji coba gratis diklaim lewat tombol Klaim Uji Coba, bukan lewat pembayaran.' });
+    }
     const pm =
       (rentalConfig.paymentMethods || []).find((m) => m.id === body.methodId) ||
       rentalConfig.paymentMethods[0] || { name: 'Transfer Manual' };
@@ -2264,7 +2783,9 @@ app.post('/api/rental/order', async (req, res) => {
       userName: u.name,
       packageId: pkg.id,
       packageName: pkg.name,
-      price: pkg.price,
+      price: effectivePrice(pkg),
+      originalPrice: String(pkg.price || ''),
+      tier: inferTier(pkg),
       durationHours: Number(pkg.durationHours) || 24,
       methodName: pm.name,
       txProof,
@@ -2272,7 +2793,7 @@ app.post('/api/rental/order', async (req, res) => {
       createdAt: Date.now(),
     };
     rentalOrders.set(orderId, ord);
-    logActivity('RENTAL_ORDER', u._id, u.name, `Mengajukan sewa ${pkg.name} (${pkg.price}) via ${pm.name}`, { orderId });
+    logActivity('RENTAL_ORDER', u._id, u.name, `Mengajukan sewa ${pkg.name} (${effectivePrice(pkg)}) via ${pm.name}`, { orderId });
     if (rentalsCol) {
       await rentalsCol.insertOne(ord).catch(() => {});
     }
@@ -2283,6 +2804,8 @@ app.post('/api/rental/order', async (req, res) => {
         ok: true,
         autoApproved: true,
         message: `Paket ${pkg.name} berhasil diaktifkan! Sekarang Anda dapat langsung Login.`,
+        // Password hanya dikirim balik bila identitas terbukti dari Telegram (bukan sekadar mengetik ID orang lain).
+        ...(tgUser && u.pwAuto ? { password: revealAutoPassword(u) } : {}),
         data: await snapshot(u),
       });
     }
@@ -2294,7 +2817,7 @@ app.post('/api/rental/order', async (req, res) => {
           `📦 <b>PENGAJUAN SEWA BARU</b> ${tw()}\n` +
             `━━━━━━━━━━━━━━\n` +
             `👤 User: <b>${esc(u.name)}</b> (<code>${u._id}</code>)\n` +
-            `🏷 Paket: <b>${esc(pkg.name)}</b> (${pkg.durationHours} Jam · ${esc(pkg.price)})\n` +
+            `🏷 Paket: <b>${esc(pkg.name)}</b> (${pkg.durationHours} Jam · ${esc(effectivePrice(pkg))})\n` +
             `💳 Metode: ${esc(pm.name)}\n` +
             `🧾 Bukti/TxHash: <code>${esc(txProof)}</code>\n` +
             `◷ Waktu: ${utcTimeStr()}`,
@@ -2324,11 +2847,109 @@ app.post('/api/rental/order', async (req, res) => {
   }
 });
 
+
+// ---------- Penjaga IP Uji Coba Gratis (1 IP = 1 uji coba) ----------
+const ipGuard = {}; // ip -> { ip, status: 'used'|'blocked'|'whitelist', userId, name, note, at, users: [] }
+function clientIp(req) {
+  const raw = req.get('x-vercel-forwarded-for') || (req.get('x-forwarded-for') || '').split(',')[0] || req.ip || '';
+  return String(raw).trim().replace(/^::ffff:/, '').slice(0, 64) || 'unknown';
+}
+async function saveIpGuard() {
+  if (!configCol) return;
+  await configCol.replaceOne({ _id: 'ip_guard' }, { _id: 'ip_guard', entries: ipGuard }, { upsert: true }).catch(() => {});
+}
+
+app.post('/api/rental/trial', async (req, res) => {
+  try {
+    const tgUser = verifyInitData(req.get('x-init-data'));
+    if (!tgUser) {
+      return res.status(403).json({ ok: false, error: 'Uji coba gratis hanya bisa diklaim dari Mini App lewat tombol Dashboard di bot Telegram.' });
+    }
+    const u = await ensureUser(tgUser);
+    const pkg = (rentalConfig.packages || []).find((p) => p.trial);
+    if (!pkg) return res.status(400).json({ ok: false, error: 'Paket uji coba belum tersedia.' });
+    const ip = clientIp(req);
+    const ent = ipGuard[ip];
+    if (ent && ent.status === 'blocked') {
+      return res.status(403).json({ ok: false, error: 'IP Anda diblokir karena terdeteksi memakai uji coba lebih dari satu akun. Hubungi admin.' });
+    }
+    if (u.trialUsed) {
+      return res.status(400).json({ ok: false, error: 'Uji coba gratis sudah pernah Anda pakai. Silakan pilih paket berbayar.' });
+    }
+    if ((!ent || ent.status !== 'whitelist') && ent && ent.status === 'used' && String(ent.userId) !== String(u._id)) {
+      ent.status = 'blocked';
+      ent.note = `IP dipakai 2 akun: ${ent.name || ent.userId} (${ent.userId}) lalu ${u.name} (${u._id})`;
+      ent.at = Date.now();
+      ent.users = [...new Set([...(ent.users || []), String(u._id)])];
+      await saveIpGuard();
+      logActivity('IP_BLOCKED', u._id, u.name, ent.note, { ip });
+      for (const admId of ADMIN_IDS) {
+        bot.sendMessage(admId, `🚫 <b>IP DIBLOKIR (uji coba ganda)</b>\nIP: <code>${esc(ip)}</code>\n${esc(ent.note)}\nBuka blokir / whitelist lewat panel Admin.`, { parse_mode: 'HTML' }).catch(() => {});
+      }
+      return res.status(403).json({ ok: false, error: 'IP ini sudah dipakai untuk uji coba akun lain. IP diblokir dan dicatat ke admin.' });
+    }
+    const addMs = Math.max(1, Number(pkg.durationHours) || 24) * 3600 * 1000;
+    u.rentalExpiresAt = Math.max(Date.now(), Number(u.rentalExpiresAt) || 0) + addMs;
+    u.rentalPlanName = pkg.name;
+    u.rentalTier = 'starter';
+    u.assetSlots = [];
+    u.trialUsed = true;
+    saveUser(u);
+    const prev = ent || {};
+    ipGuard[ip] = { ...prev, ip, status: prev.status === 'whitelist' ? 'whitelist' : 'used', userId: String(u._id), name: u.name, at: Date.now(), users: [...new Set([...(prev.users || []), String(u._id)])] };
+    await saveIpGuard();
+    logActivity('TRIAL_CLAIMED', u._id, u.name, `Uji coba 1 hari dari IP ${ip}`, { ip });
+    return res.json({ ok: true, message: 'Uji coba gratis 1 hari aktif! Silakan Login.', data: await snapshot(u) });
+  } catch (e) {
+    return res.status(400).json({ ok: false, error: e.message || 'Gagal klaim uji coba' });
+  }
+});
+
+// ---------- Proxy terjemahan (agar semua bahasa jalan walau HP tidak bisa akses Google langsung) ----------
+const trCache = new Map();
+const trHits = new Map();
+setInterval(() => trHits.clear(), 60 * 1000).unref();
+const TR_LANGS = { en: 'en', es: 'es', de: 'de', fr: 'fr', tr: 'tr', uz: 'uz', ru: 'ru', vi: 'vi', tl: 'tl', th: 'th', ms: 'ms', hi: 'hi', ur: 'ur', zh: 'zh-CN', ko: 'ko', ja: 'ja', af: 'af', ar: 'ar' };
+async function gtServer(text, tl) {
+  const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=id&tl=' + encodeURIComponent(tl) + '&dt=t&q=' + encodeURIComponent(text);
+  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+  if (!r.ok) throw new Error('tr ' + r.status);
+  const j = await r.json();
+  return (j[0] || []).map((x) => x[0]).join('');
+}
+app.post('/api/i18n', async (req, res) => {
+  try {
+    const ip = clientIp(req);
+    const n = (trHits.get(ip) || 0) + 1;
+    trHits.set(ip, n);
+    if (n > 60) return res.status(429).json({ ok: false, error: 'rate' });
+    const tl = TR_LANGS[String((req.body || {}).lang || '')];
+    const texts = Array.isArray((req.body || {}).texts) ? req.body.texts.slice(0, 30) : [];
+    if (!tl || !texts.length) return res.status(400).json({ ok: false });
+    const out = [];
+    for (const raw of texts) {
+      const t = String(raw || '').replace(/\s*\n\s*/g, ' ').slice(0, 400);
+      const key = tl + '|' + t;
+      if (!t.trim()) { out.push(''); continue; }
+      if (trCache.has(key)) { out.push(trCache.get(key)); continue; }
+      let tr = '';
+      try { tr = (await gtServer(t, tl)).trim(); } catch (e) { tr = ''; }
+      if (tr) { if (trCache.size > 20000) trCache.clear(); trCache.set(key, tr); }
+      out.push(tr);
+    }
+    return res.json({ ok: true, texts: out });
+  } catch (e) {
+    return res.status(400).json({ ok: false });
+  }
+});
+
 // ---------- Login User Langsung Tanpa OTP + Cek Paket Sewa + Sambungkan Trade ----------
 app.post('/api/auth/login', async (req, res) => {
   try {
     const body = req.body || {};
     const tgUser = verifyInitData(req.get('x-init-data'));
+    const lockErr = checkIdentLock(tgUser, body.identifier);
+    if (lockErr) return res.status(403).json({ ok: false, error: lockErr });
     let u = null;
     if (tgUser) {
       u = await ensureUser(tgUser);
@@ -2450,6 +3071,37 @@ const h = (fn, allowWhenLocked = false) => async (req, res) => {
 
 app.get('/api/status', h(async (u) => ({ data: await snapshot(u) }), true));
 
+app.get('/api/cs/messages', h(async (u) => { requireCs(u); return { messages: csList(u) }; }, true));
+app.post('/api/cs/send', h(async (u, req) => {
+  await csFromUser(u, req.body && req.body.text);
+  return { message: 'Pesan terkirim ke Customer Service', messages: csList(u) };
+}, true));
+
+// Password otomatis: lihat & Keep. Hanya pemilik akun (Telegram initData / sesi login).
+app.post(
+  '/api/pw/reveal',
+  h(async (u) => {
+    const pw = revealAutoPassword(u);
+    if (!pw) throw new Error('Tidak ada password otomatis aktif untuk akun ini.');
+    logActivity('PW_REVEAL', u._id, u.name, 'Melihat password otomatis');
+    return { password: pw };
+  }, true)
+);
+app.post(
+  '/api/pw/keep',
+  h(async (u, req) => {
+    if (!u.pwAuto) throw new Error('Tidak ada password otomatis untuk disimpan.');
+    u.pwKeep = !!(req.body && req.body.keep);
+    if (!u.pwKeep && !isRentalActive(u)) { u.pwWarned = true; u.pwDeleteAt = Date.now() + PW_GRACE_MS; }
+    saveUser(u);
+    logActivity(u.pwKeep ? 'PW_KEEP' : 'PW_UNKEEP', u._id, u.name, u.pwKeep ? 'Password otomatis ditahan (Keep)' : 'Keep password dibatalkan');
+    return {
+      message: u.pwKeep ? 'Password disimpan: tidak dihapus walau sewa habis.' : 'Keep dibatalkan: password dihapus otomatis saat sewa habis.',
+      data: await snapshot(u),
+    };
+  }, true)
+);
+
 app.post(
   '/api/auth/logout',
   h(
@@ -2551,6 +3203,48 @@ app.get(
 );
 
 app.get(
+  '/api/admin/ip-guard',
+  h(
+    async (u) => {
+      requireAdmin(u);
+      const list = Object.values(ipGuard).sort((a, b) => (b.at || 0) - (a.at || 0)).slice(0, 200);
+      return { ips: list };
+    },
+    true
+  )
+);
+
+app.post(
+  '/api/admin/ip-guard',
+  h(
+    async (u, req) => {
+      requireAdmin(u);
+      const b = req.body || {};
+      const ip = String(b.ip || '').trim();
+      if (!ip) throw new Error('IP wajib diisi');
+      const act = String(b.action || '');
+      const ent = ipGuard[ip];
+      if (act === 'unblock') {
+        if (!ent) throw new Error('IP tidak ada di catatan');
+        delete ipGuard[ip];
+      } else if (act === 'whitelist') {
+        ipGuard[ip] = { ...(ent || {}), ip, status: 'whitelist', note: 'Whitelist oleh admin', at: Date.now(), users: (ent && ent.users) || [] };
+      } else if (act === 'unwhitelist' || act === 'remove') {
+        delete ipGuard[ip];
+      } else if (act === 'block') {
+        ipGuard[ip] = { ...(ent || {}), ip, status: 'blocked', note: 'Diblokir manual oleh admin', at: Date.now(), users: (ent && ent.users) || [] };
+      } else {
+        throw new Error('Aksi tidak dikenal');
+      }
+      await saveIpGuard();
+      logActivity('IP_GUARD_' + act.toUpperCase(), u._id, u.name, `${act} IP ${ip}`, { ip });
+      return { ips: Object.values(ipGuard).sort((a, c) => (c.at || 0) - (a.at || 0)).slice(0, 200), message: 'Tersimpan' };
+    },
+    true
+  )
+);
+
+app.get(
   '/api/admin/logs',
   h(
     async (u, req) => {
@@ -2628,9 +3322,12 @@ app.post(
         rentalConfig.packages = body.packages.map((p, idx) => ({
           id: String(p.id || `pkg_${idx + 1}`),
           name: String(p.name || 'Paket Sewa').trim(),
+          tier: TIER_LIMITS[p.tier] ? p.tier : inferTier(p),
           price: String(p.price || '10 USDT').trim(),
+          discountPrice: String(p.discountPrice || '').trim(),
           durationHours: Math.max(1, Number(p.durationHours) || 24),
           desc: String(p.desc || '').trim(),
+          trial: !!p.trial,
         }));
       }
       if (Array.isArray(body.paymentMethods) && body.paymentMethods.length) {
@@ -2639,6 +3336,7 @@ app.post(
           name: String(m.name || 'Metode Pembayaran').trim(),
           account: String(m.account || '').trim(),
           holder: String(m.holder || '').trim(),
+          country: (/^(ALL|[A-Za-z]{2})$/.test(String(m.country || '').trim()) ? String(m.country).trim().toUpperCase() : 'ALL'),
         }));
       }
       if (body.instructions !== undefined) {
@@ -2665,7 +3363,7 @@ app.post(
   h(
     async (u, req) => {
       requireAdmin(u);
-      const { action, orderId, targetUserId, hours, planName } = req.body || {};
+      const { action, orderId, targetUserId, hours, planName, tier } = req.body || {};
       if (action === 'approve' && orderId) {
         const ord = await approveRentalOrder(orderId, u._id);
         return { message: `Sewa user ${ord.userId} (${ord.packageName}) berhasil di-ACC!` };
@@ -2692,6 +3390,7 @@ app.post(
         const base = Math.max(Date.now(), Number(targetU.rentalExpiresAt) || 0);
         targetU.rentalExpiresAt = base + addH * 3600 * 1000;
         targetU.rentalPlanName = planName || `Aktif Manual (+${addH} Jam)`;
+        if (TIER_LIMITS[tier]) { targetU.rentalTier = tier; targetU.assetSlots = []; }
         targetU.purchasedAt = Date.now();
         saveUser(targetU);
         logActivity('RENTAL_GRANT', targetU._id, targetU.name, `Admin ${u._id} menambah sewa +${addH} jam`, { hours: addH });
@@ -2770,6 +3469,44 @@ app.post(
   })
 );
 
+app.get(
+  '/api/stats',
+  h(async (u) => {
+    if (!isProUp(u)) throw new Error('Statistik lengkap khusus paket Pro dan Elite. Upgrade paket untuk memakainya.');
+    const rows = await tradesCol.find({ userId: u._id }).sort({ time: 1 }).limit(5000).toArray();
+    return { stats: computeStats(rows) };
+  })
+);
+
+app.post(
+  '/api/export-csv',
+  h(async (u) => {
+    if (!isProUp(u)) throw new Error('Ekspor CSV khusus paket Pro dan Elite. Upgrade paket untuk memakainya.');
+    const rows = await tradesCol.find({ userId: u._id }).sort({ time: 1 }).limit(5000).toArray();
+    if (!rows.length) throw new Error('Belum ada riwayat transaksi untuk diekspor');
+    const head = ['waktu_utc', 'broker', 'aset', 'simbol', 'sisi', 'harga', 'jumlah', 'pnl', 'catatan'];
+    const lines = [head.join(',')].concat(
+      rows.map((r) => [new Date(r.time).toISOString(), r.broker, r.asset, r.symbol, r.side, r.price, r.amount, r.pnl, r.note].map(csvCell).join(','))
+    );
+    const buf = Buffer.from('\ufeff' + lines.join('\n'), 'utf8');
+    await bot.sendDocument(u._id, buf, { caption: `Riwayat trade (${rows.length} baris)` }, { filename: `riwayat-trade-${utcDayKey()}.csv`, contentType: 'text/csv' });
+    logActivity('EXPORT_CSV', u._id, u.name, `Ekspor riwayat trade (${rows.length} baris)`);
+    return { message: `CSV (${rows.length} baris) terkirim ke chat Telegram Anda` };
+  })
+);
+
+app.post(
+  '/api/panic',
+  h(async (u) => {
+    const { r } = await actionPanic(u);
+    return {
+      message: r
+        ? `DARURAT: Auto-Trade mati & posisi ditutup · PnL ${sign(r.pnl, 4)} ${r.quote}`
+        : 'DARURAT: Auto-Trade dimatikan (tidak ada posisi terbuka)',
+    };
+  })
+);
+
 app.post(
   '/api/auto',
   h(async (u, req) => {
@@ -2819,6 +3556,7 @@ app.delete(
 app.post(
   '/api/send-status',
   h(async (u, req) => {
+    if (!hasFeature(u, 'chart')) throw new Error('Fitur grafik tidak termasuk paket Anda. Upgrade paket untuk memakainya.');
     const chartType = req.body && req.body.chartType === 'profit' ? 'profit' : 'price';
     await sendPanel(
       u,
@@ -2851,6 +3589,52 @@ app.post(
   })
 );
 
+// ---------- Poin 6 (Elite): alarm harga ----------
+function requireElite(u, what) {
+  if (!isElite(u)) throw new Error(`${what} khusus paket Elite. Upgrade paket untuk memakainya.`);
+}
+
+app.get(
+  '/api/alarms',
+  h(async (u) => {
+    requireElite(u, 'Alarm harga');
+    return { alarms: u.alarms || [], max: MAX_ALARMS };
+  })
+);
+
+app.post(
+  '/api/alarms',
+  h(async (u, req) => {
+    requireElite(u, 'Alarm harga');
+    const asset = String((req.body && req.body.asset) || '').toUpperCase();
+    if (!ASSETS[asset]) throw new Error('Aset tidak dikenal');
+    const level = Number(req.body && req.body.level);
+    if (!Number.isFinite(level) || level <= 0) throw new Error('Level harga harus angka lebih dari 0');
+    if ((u.alarms || []).length >= MAX_ALARMS) throw new Error(`Maksimal ${MAX_ALARMS} alarm aktif. Hapus salah satu dulu.`);
+    const m = await getPublicAssetMarket(asset, false);
+    if (!m || m.simulated || !Number.isFinite(m.price)) throw new Error('Harga pasar belum tersedia. Coba lagi sebentar.');
+    if (level === m.price) throw new Error('Level harga sama dengan harga sekarang');
+    const a = { id: newAlarmId(), asset, level, dir: level > m.price ? 'above' : 'below', createdAt: Date.now() };
+    u.alarms = [...(u.alarms || []), a];
+    saveUser(u);
+    logActivity('ALARM_SET', u._id, u.name, `Alarm ${asset} ${a.dir} ${level}`);
+    const ac = getAssetCfg(asset);
+    return { message: `Alarm dipasang: ${asset} ${a.dir === 'above' ? '≥' : '≤'} ${fmt(level, ac.decimals)}`, alarm: a };
+  })
+);
+
+app.delete(
+  '/api/alarms/:id',
+  h(async (u, req) => {
+    requireElite(u, 'Alarm harga');
+    const before = (u.alarms || []).length;
+    u.alarms = (u.alarms || []).filter((a) => a.id !== req.params.id);
+    if (u.alarms.length === before) throw new Error('Alarm tidak ditemukan');
+    saveUser(u);
+    return { message: 'Alarm dihapus' };
+  })
+);
+
 // ---------- Loop auto-trade (Multi-User Concurrent Pool) ----------
 async function tickUser(u) {
   const r = rt(u._id);
@@ -2872,13 +3656,38 @@ async function tickUser(u) {
       const { rsi, price } = m;
       const { tp, sl, rsiBuy, rsiSell } = u.settings;
       const pos = u.position;
+      const tier = getUserTier(u);
+      const beOn = Number(u.settings.breakEvenPct) > 0 && tier !== 'starter';
+      const stratOn = ['pro', 'elite'].includes(tier) && STRATEGIES[u.settings.strategy] && u.settings.strategy !== 'rsi';
+      const trendOn = Number(u.settings.trendFilter) === 1 && tier !== 'starter';
+      const sig = stratOn ? strategySignals(m, rsiBuy, rsiSell, u.settings.strategy) : null;
+      const trOn = Number(u.settings.trailAtr) > 0 && (tier === 'pro' || tier === 'elite');
 
       if (pos) {
         const chg = ((price - pos.entry) / pos.entry) * 100;
+        let dirty = false;
+        if (!Number.isFinite(pos.peak) || price > pos.peak) { pos.peak = Math.max(price, pos.entry); dirty = true; }
+        if (beOn && !pos.beArmed && chg >= Number(u.settings.breakEvenPct)) {
+          pos.beArmed = true; dirty = true;
+          notify(u, `⚖ <b>BREAK-EVEN AKTIF</b> (${info.symbol})\nProfit ${sign(chg)}% — stop loss dipindah ke harga entry <code>${fmt(pos.entry, info.decimals)}</code>.`);
+        }
+        if (trOn && !pos.trailArmed && chg >= tp) {
+          pos.trailArmed = true; dirty = true;
+          notify(u, `⤴ <b>TRAILING STOP AKTIF</b> (${info.symbol})\nTarget TP ${sign(chg)}% tercapai — posisi dibiarkan naik, stop mengikuti harga (${u.settings.trailAtr}× ATR).`);
+        }
+        if (dirty) saveUser(u);
         let reason = null;
-        if (chg >= tp) reason = `◎ TAKE PROFIT (${sign(chg)}%)`;
-        else if (chg <= -sl) reason = `■ STOP LOSS (${sign(chg)}%)`;
-        else if (rsi > rsiSell) reason = `△ RSI ${rsi.toFixed(1)} di atas ${rsiSell}`;
+        if (chg <= -sl) reason = `■ STOP LOSS (${sign(chg)}%)`;
+        else if (pos.beArmed && beOn && price <= pos.entry) reason = `⚖ BREAK-EVEN STOP (${sign(chg)}%)`;
+        else if (pos.trailArmed && trOn) {
+          const atr = calcAtr(m);
+          const stopPx = pos.peak - Number(u.settings.trailAtr) * atr;
+          if (atr > 0 && price <= stopPx) reason = `⤴ TRAILING STOP (puncak ${fmt(pos.peak, info.decimals)}, ${sign(chg)}%)`;
+        }
+        if (!reason && !(pos.trailArmed && trOn) && chg >= tp) reason = `◎ TAKE PROFIT (${sign(chg)}%)`;
+        if (!reason && sig && sig.sell && chg > 0) reason = `△ Sinyal jual ${STRATEGIES[u.settings.strategy]} (${sig.why})`;
+        if (!reason && !stratOn && rsi > rsiSell) reason = `△ RSI ${rsi.toFixed(1)} di atas ${rsiSell}`;
+        if (!reason && stratOn && rsi > rsiSell) reason = `△ RSI ${rsi.toFixed(1)} di atas ${rsiSell}`;
         if (reason) {
           const res = await sellPosition(u, reason);
           if (res) {
@@ -2891,11 +3700,12 @@ async function tickUser(u) {
             );
           }
         }
-      } else if (rsi < rsiBuy && Date.now() - (u.lastSellAt || 0) > COOLDOWN_MIN * 60000) {
-        const res = await buy(u, `RSI ${rsi.toFixed(2)}`);
+      } else if ((sig ? sig.buy : rsi < rsiBuy) && (!trendOn || trendIsUp(m)) && inSession(u) && !dailyLossHit(u) && Date.now() - (u.lastSellAt || 0) > COOLDOWN_MIN * 60000) {
+        const why = sig ? `${STRATEGIES[u.settings.strategy]}: ${sig.why}` : `RSI ${rsi.toFixed(2)}`;
+        const res = await buy(u, why);
         await notify(
           u,
-          `▲ <b>AUTO BUY</b> (${info.symbol} · ${info.broker.short})\n▽ RSI ${rsi.toFixed(1)} di bawah ${rsiBuy}\n` +
+          `▲ <b>AUTO BUY</b> (${info.symbol} · ${info.broker.short})\n▽ ${esc(why)}${trendOn ? ' · tren naik ✓' : ''}\n` +
             `▣ <code>${info.broker.isMt ? res.got.toFixed(2) : res.got.toFixed(4)}</code> ${info.unit} @ <code>${fmt(res.price, info.decimals)}</code>\n` +
             `◷ ${utcTimeStr()}`
         );
@@ -2963,6 +3773,34 @@ if (STATUS_INTERVAL_MIN > 0) {
   }, STATUS_INTERVAL_MIN * 60 * 1000);
 }
 
+// Laporan harian: semua paket mendapat ringkasan dasar; Elite mendapat laporan VIP lengkap.
+function buildEliteReportText(u, info, rows, week) {
+  const sells = rows.filter((r) => r.side === 'SELL' && Number.isFinite(Number(r.pnl)));
+  const wins = sells.filter((r) => Number(r.pnl) >= 0).length;
+  const losses = sells.length - wins;
+  const pnls = sells.map((r) => Number(r.pnl));
+  const best = pnls.length ? Math.max(...pnls) : 0;
+  const worst = pnls.length ? Math.min(...pnls) : 0;
+  const wr = sells.length ? (wins / sells.length) * 100 : 0;
+  const weekSum = week.reduce((a, d) => a + d.pnl, 0);
+  const pos = u.position;
+  const q = info.quote;
+  return (
+    `✦ <b>LAPORAN HARIAN VIP</b> · UTC ${u.today.date} (${esc(info.broker.short)})\n` +
+    `━━━━━━━━━━━━━━\n` +
+    `⇄ Transaksi: <b>${u.today.trades}</b> (tutup: ${sells.length})\n` +
+    `${dot(u.today.pnl)} Profit hari ini: <b>${sign(u.today.pnl)} ${q}</b>\n` +
+    `◎ Win rate: <b>${wr.toFixed(1)}%</b> (${wins}W / ${losses}L)\n` +
+    `▲ Terbaik: <b>${sign(best)}</b> · ▼ Terburuk: <b>${sign(worst)}</b>\n` +
+    `▤ 7 hari terakhir: <b>${sign(weekSum)} ${q}</b>\n` +
+    week.map((d) => `  ${d.date.slice(5)}  ${dot(d.pnl)} ${sign(d.pnl)}`).join('\n') +
+    `\n▣ Total tertutup: <b>${sign(u.realizedPnl)} ${q}</b>\n` +
+    `⌖ Posisi terbuka: <b>${pos ? esc(pos.symbol || info.symbol) + ' @ ' + fmt(pos.entry, info.decimals) : 'tidak ada'}</b>\n` +
+    `⏰ Alarm harga aktif: <b>${(u.alarms || []).length}</b>\n` +
+    `◷ ${utcTimeStr()}`
+  );
+}
+
 setInterval(async () => {
   if (utcHour() !== DAILY_REPORT_HOUR) return;
   for (const u of users.values()) {
@@ -2971,6 +3809,21 @@ setInterval(async () => {
     const info = getUserTradeInfo(u);
     u.today.reported = true;
     saveUser(u);
+    if (isElite(u) && tradesCol) {
+      try {
+        const since = new Date(u.today.date + 'T00:00:00.000Z');
+        const rows = await tradesCol.find({ userId: u._id, time: { $gte: since } }).toArray();
+        const week = Object.keys(u.history || {})
+          .sort()
+          .slice(-7)
+          .map((d) => ({ date: d, pnl: Number(u.history[d]) || 0 }));
+        await notify(u, buildEliteReportText(u, info, rows, week));
+        await sleep(100);
+        continue;
+      } catch (e) {
+        console.error('Laporan VIP:', e.message); // jatuh ke laporan dasar
+      }
+    }
     await notify(
       u,
       `▤ <b>Laporan Harian UTC ${u.today.date}</b> (${info.broker.short})\n` +
@@ -2982,6 +3835,48 @@ setInterval(async () => {
     await sleep(100);
   }
 }, 60 * 1000);
+
+// ---------- Poin 6 (Elite): pemeriksa alarm harga ----------
+let alarmChecking = false;
+async function checkAlarms() {
+  if (alarmChecking) return;
+  alarmChecking = true;
+  try {
+    const owners = [...users.values()].filter(
+      (u) => Array.isArray(u.alarms) && u.alarms.length && isElite(u) && isRentalActive(u)
+    );
+    if (!owners.length) return;
+    const prices = {};
+    for (const id of new Set(owners.flatMap((u) => u.alarms.map((a) => a.asset)))) {
+      try {
+        const m = await getPublicAssetMarket(id, false);
+        if (m && !m.simulated && Number.isFinite(m.price)) prices[id] = m.price;
+      } catch (e) {}
+    }
+    for (const u of owners) {
+      const fired = u.alarms.filter((a) => alarmHit(a, prices[a.asset]));
+      if (!fired.length) continue;
+      u.alarms = u.alarms.filter((a) => !fired.includes(a));
+      saveUser(u);
+      for (const a of fired) {
+        const ac = getAssetCfg(a.asset);
+        await notify(
+          u,
+          `⏰ <b>ALARM HARGA</b> · ${esc(ac.name)} (${esc(a.asset)})\n` +
+            `Harga ${a.dir === 'above' ? 'naik menembus' : 'turun menembus'} <code>${fmt(a.level, ac.decimals)}</code>\n` +
+            `◆ Sekarang: <code>${fmt(prices[a.asset], ac.decimals)}</code>\n` +
+            `◷ ${utcTimeStr()}`
+        );
+        logActivity('ALARM', u._id, u.name, `Alarm ${a.asset} ${a.dir} ${a.level} terpicu @ ${prices[a.asset]}`);
+      }
+    }
+  } catch (e) {
+    console.error('Alarm:', e.message);
+  } finally {
+    alarmChecking = false;
+  }
+}
+setInterval(checkAlarms, 15 * 1000);
 
 // ---------- Start ----------
 process.on('unhandledRejection', (e) => console.error('Unhandled:', e && e.message));
@@ -2998,6 +3893,8 @@ let mongoClient = null;
     configCol = db.collection('config');
     rentalsCol = db.collection('rentals');
     logsCol = db.collection('activity_logs');
+    csCol = db.collection('cs_messages');
+    await csCol.createIndex({ at: 1 }, { expireAfterSeconds: 60 * 86400 }).catch(() => {});
     await logsCol.createIndex({ time: -1 });
     await logsCol.createIndex({ userId: 1, time: -1 });
     await logsCol.createIndex({ time: 1 }, { expireAfterSeconds: 90 * 86400 }).catch(() => {});
@@ -3008,6 +3905,25 @@ let mongoClient = null;
     const savedCfg = await configCol.findOne({ _id: 'rental_config' });
     if (savedCfg) {
       rentalConfig = { ...DEFAULT_RENTAL_CONFIG, ...savedCfg };
+      rentalConfig.packages = (rentalConfig.packages || []).map((p) => ({
+        ...p,
+        tier: inferTier(p),
+        discountPrice: String(p.discountPrice || ''),
+      }));
+      if (!rentalConfig.packages.some((p) => p.trial)) {
+        rentalConfig.packages.unshift(DEFAULT_RENTAL_CONFIG.packages.find((p) => p.trial));
+      }
+      if (!(rentalConfig.paymentMethods || []).some((m) => m.id === 'pm_paypal')) {
+        rentalConfig.paymentMethods = [DEFAULT_RENTAL_CONFIG.paymentMethods.find((m) => m.id === 'pm_paypal'), ...(rentalConfig.paymentMethods || [])];
+      }
+      try {
+        const g = await configCol.findOne({ _id: 'ip_guard' });
+        if (g && g.entries) Object.assign(ipGuard, g.entries);
+      } catch (e) {}
+      if (!rentalConfig.packages.some((p) => p.tier === 'elite')) {
+        rentalConfig.packages.push(DEFAULT_RENTAL_CONFIG.packages.find((p) => p.tier === 'elite'));
+      }
+      await saveRentalConfig();
     } else {
       await saveRentalConfig();
     }
@@ -3016,6 +3932,16 @@ let mongoClient = null;
       rentalOrders.set(String(rDoc._id), rDoc);
     }
 
+    try {
+      const csDocs = await csCol.find({}).sort({ at: -1 }).limit(3000).toArray();
+      for (const d of csDocs.sort((a, b) => a.at - b.at)) {
+        const arr = csChats.get(String(d.userId)) || [];
+        arr.push(d);
+        csChats.set(String(d.userId), arr);
+      }
+    } catch (e) {
+      console.error('Muat chat CS:', e.message);
+    }
     for (const doc of await usersCol.find({}).toArray()) {
       users.set(doc._id, normalizeUserDoc(doc));
     }
@@ -3048,6 +3974,7 @@ let mongoClient = null;
       { command: 'profit', description: '▤ Kirim grafik profit 7 hari' },
       { command: 'asset', description: '❖ Pilih aset trading' },
       { command: 'broker', description: '⇄ Pilih & atur broker' },
+      { command: 'cs', description: '💬 Chat Customer Service (pembeli paket)' },
     ]);
     if (WEBAPP_URL) {
       await bot
