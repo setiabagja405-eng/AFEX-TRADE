@@ -31,7 +31,7 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || '7706512451,8821716544')
 const isAdminId = (id) => ADMIN_IDS.includes(String(id || '').trim());
 
 const sha256Hex = (v) => crypto.createHash('sha256').update(String(v)).digest('hex');
-// PIN Eksekutif Admin (utama) = 270223 ; PIN cadangan saat Face Scan gagal = 20052007.
+// PIN Eksekutif Admin: hanya hash di bawah. Disarankan memakai env ADMIN_PIN / ADMIN_FALLBACK_PIN.
 // Disimpan sebagai hash. Bisa ditambah lewat env ADMIN_PIN / ADMIN_FALLBACK_PIN.
 const MAIN_ADMIN_PIN_HASHES = [
   '3f85f14582604240238d1f15659d23eae027664aefe5617e2042dd788f6f14e9',
@@ -41,25 +41,57 @@ const FALLBACK_ADMIN_PIN_HASHES = [
   '5ed4fb3310b651ead0153f942016f35eb42f2b45d7552fdd30bb4e5dd254b3d6',
   ...(process.env.ADMIN_FALLBACK_PIN ? [sha256Hex(process.env.ADMIN_FALLBACK_PIN)] : []),
 ];
-const adminPinFails = new Map(); // id admin -> { n, until }
+const trialRefuseAt = new Map(); // id -> waktu pesan tolak terakhir (cegah spam bot)
+const adminPinFails = new Map();
+// PIN yang diganti lewat panel disimpan di database sebagai hash scrypt + salt acak (bukan di kode / README).
+// Setelah PIN suatu jenis diganti, hash bawaan lama untuk jenis itu otomatis tidak berlaku lagi.
+function scryptPin(pin, saltHex) {
+  return crypto.scryptSync(String(pin), Buffer.from(saltHex, 'hex'), 32).toString('hex');
+}
+function makePinRecord(pin, byId) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  return { salt, hash: scryptPin(pin, salt), at: Date.now(), by: String(byId) };
+}
+function storedPinOk(rec, pin) {
+  if (!rec || !rec.salt || !rec.hash) return false;
+  const a = Buffer.from(scryptPin(pin, rec.salt), 'hex'), b = Buffer.from(String(rec.hash), 'hex');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+function adminPinMatches(kind, pin) {
+  const rec = rentalConfig.adminPin && rentalConfig.adminPin[kind];
+  if (rec) return storedPinOk(rec, pin);
+  const sha = sha256Hex(pin);
+  return (kind === 'fallback' ? FALLBACK_ADMIN_PIN_HASHES : [...MAIN_ADMIN_PIN_HASHES, ...(rentalConfig.adminPinHashes || [])]).includes(sha);
+}
+function publicRentalConfig() {
+  const { adminPin, adminPinHashes, ...rest } = rentalConfig; // jangan kirim hash PIN ke klien
+  return rest;
+}
+function weakPin(pin) {
+  if (/^(\d)\1+$/.test(pin)) return true;
+  const d = pin.split('').map(Number);
+  const step = d[1] - d[0];
+  return Math.abs(step) === 1 && d.every((x, i) => i === 0 || x - d[i - 1] === step);
+}
 
 const DEFAULT_RENTAL_CONFIG = {
   _id: 'rental_config',
   requireRental: true,
   autoApprove: false,
+  autoVerify: true,
   instructions:
     'Pilih paket sewa di bawah, lakukan pembayaran sesuai harga paket ke salah satu metode pembayaran resmi, lalu isi Bukti Transfer / TxHash dan klik Kirim Pembayaran Sewa.',
   packages: [
     { id: 'pkg_trial', tier: 'starter', trial: true, name: 'Uji Coba Trade (1 Hari)', price: 'GRATIS', discountPrice: '', durationHours: 24,
       desc: 'Gratis 1 hari · 1 kali per IP · fitur Starter' },
     { id: 'pkg_1d', tier: 'starter', name: 'Starter (1 Hari)', price: '5 USDT', discountPrice: '', durationHours: 24,
-      desc: '1 aset · Auto-trade RSI · maks 5 transaksi/hari' },
+      desc: '1 aset · Auto-trade RSI · maks 5 transaksi/hari · tanpa konfirmasi tambahan' },
     { id: 'pkg_7d', tier: 'trader', name: 'Trader (7 Hari)', price: '25 USDT', discountPrice: '', durationHours: 168,
-      desc: 'Sampai 3 aset · semua grafik · maks 20 transaksi/hari' },
+      desc: 'Sampai 3 aset · semua grafik · maks 20 transaksi/hari · Konfirmasi Sinyal L1 (pembalikan)' },
     { id: 'pkg_30d', tier: 'pro', name: 'Pro (30 Hari)', price: '75 USDT', discountPrice: '', durationHours: 720,
-      desc: 'Semua aset & MT4/MT5 · tanpa batas transaksi' },
+      desc: 'Semua aset & MT4/MT5 · tanpa batas · Konfirmasi Sinyal L2 (+momentum & volatilitas) · 4 strategi' },
     { id: 'pkg_365d', tier: 'elite', name: 'Elite VIP (365 Hari)', price: '900 USDT', discountPrice: '580 USDT', durationHours: 8760,
-      desc: 'Semua fitur Pro + fitur eksklusif Elite' },
+      desc: 'Semua fitur Pro · Konfirmasi Sinyal L3 (+tren/harga murah) · alarm harga · laporan VIP' },
   ],
   paymentMethods: [
     {
@@ -695,6 +727,7 @@ const pubLive = makeBinance({}, false);
 let usersCol = null;
 let logsCol = null;
 let csCol = null;
+let trCol = null;
 // Catatan aktivitas (login, daftar, trade, sewa, aksi admin). Otomatis dihapus setelah 90 hari.
 function logActivity(type, userId, name, detail, extra) {
   if (!logsCol) return;
@@ -714,6 +747,200 @@ let configCol = null;
 let rentalsCol = null;
 
 const users = new Map();
+
+// ---------- Terjemahan: dipakai Mini App (/api/i18n) & SEMUA pesan bot sesuai bahasa pilihan user ----------
+const TR_LANGS = { en: 'en', es: 'es', de: 'de', fr: 'fr', tr: 'tr', uz: 'uz', ru: 'ru', vi: 'vi', tl: 'tl', th: 'th', ms: 'ms', hi: 'hi', ur: 'ur', zh: 'zh-CN', ko: 'ko', ja: 'ja', af: 'af', ar: 'ar' };
+const trCache = new Map();
+const trInflight = new Map();
+const trHits = new Map();
+setInterval(() => trHits.clear(), 60 * 1000).unref();
+let trActive = 0;
+const trWait = [];
+const trAcquire = () => new Promise((res) => { if (trActive < 6) { trActive++; res(); } else trWait.push(res); });
+const trRelease = () => { const n = trWait.shift(); if (n) n(); else trActive--; };
+const trTimeout = (ms) => AbortSignal.timeout(ms);
+
+// 3 jalur terjemahan (cadangan berurutan) agar tidak ada teks yang gagal diterjemahkan
+async function gtServer(text, tl) {
+  const q = encodeURIComponent(text);
+  const routes = [
+    async () => {
+      const r = await fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=id&tl=${encodeURIComponent(tl)}&dt=t&q=${q}`, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: trTimeout(7000) });
+      if (!r.ok) throw new Error('gtx ' + r.status);
+      const j = await r.json();
+      return (j[0] || []).map((x) => x[0]).join('');
+    },
+    async () => {
+      const r = await fetch(`https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=id&tl=${encodeURIComponent(tl)}&q=${q}`, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: trTimeout(7000) });
+      if (!r.ok) throw new Error('dict ' + r.status);
+      const j = await r.json();
+      if (j && Array.isArray(j.sentences)) return j.sentences.map((x) => x.trans || '').join('');
+      if (Array.isArray(j)) return (Array.isArray(j[0]) ? j[0][0] : j[0]) || '';
+      return '';
+    },
+    async () => {
+      if (text.length > 480) throw new Error('mymemory len');
+      const r = await fetch(`https://api.mymemory.translated.net/get?q=${q}&langpair=id|${encodeURIComponent(tl)}`, { signal: trTimeout(7000) });
+      if (!r.ok) throw new Error('mm ' + r.status);
+      const j = await r.json();
+      return (j && j.responseData && j.responseData.translatedText) || '';
+    },
+  ];
+  let lastErr = null;
+  for (const route of routes) {
+    try {
+      const out = String((await route()) || '').trim();
+      if (out) return out;
+    } catch (e) { lastErr = e; }
+  }
+  throw lastErr || new Error('tr kosong');
+}
+
+async function translateText(raw, tl) {
+  const t = String(raw || '').replace(/\s*\n\s*/g, ' ').trim().slice(0, 1500);
+  if (!t) return '';
+  const key = tl + '|' + t;
+  if (trCache.has(key)) return trCache.get(key);
+  if (trInflight.has(key)) return trInflight.get(key);
+  const p = (async () => {
+    const id = sha256Hex(key).slice(0, 40);
+    if (trCol) {
+      try {
+        const d = await trCol.findOne({ _id: id });
+        if (d && d.t) { trCache.set(key, d.t); return d.t; }
+      } catch (e) {}
+    }
+    let out = '';
+    await trAcquire();
+    try { out = (await gtServer(t, tl)).trim(); } catch (e) { out = ''; } finally { trRelease(); }
+    if (out) {
+      if (trCache.size > 30000) trCache.clear();
+      trCache.set(key, out);
+      if (trCol) trCol.replaceOne({ _id: id }, { _id: id, l: tl, s: t.slice(0, 160), t: out, at: new Date() }, { upsert: true }).catch(() => {});
+    }
+    return out;
+  })().finally(() => trInflight.delete(key));
+  trInflight.set(key, p);
+  return p;
+}
+
+// ----- Terjemah pesan bot (HTML Telegram / teks biasa) tanpa merusak tag, ID, angka -----
+const NUM_RE = /\d[\d.,:]*\d|\d/g;
+const trWorthy = (core) => {
+  const c = String(core).replace(/\{\d+\}/g, '');
+  if (c.length < 2 || !/[A-Za-z\u00C0-\u024F]{2,}/.test(c)) return false;
+  if (/^[\sA-Z0-9:.,%$+\-\/()#@_]+$/.test(c) && c.length <= 8) return false;
+  return true;
+};
+async function translateTemplate(text, tl) {
+  const nums = [];
+  const tpl = text.replace(NUM_RE, (m) => { nums.push(m); return `{${nums.length}}`; });
+  if (!nums.length) return translateText(text, tl);
+  const has = (s) => { for (let i = 1; i <= nums.length; i++) if (!new RegExp('\\{\\s*' + i + '\\s*\\}').test(s)) return false; return true; };
+  const put = (s) => s.replace(/\{\s*(\d+)\s*\}/g, (m, n) => (nums[n - 1] !== undefined ? nums[n - 1] : m));
+  const out = await translateText(tpl, tl);
+  if (out && has(out)) return put(out);
+  // cadangan: terjemahkan hanya potongan huruf, angka dibiarkan
+  const parts = text.split(/(\d[\d.,:]*\d|\d)/);
+  const done = await Promise.all(parts.map(async (p, i) => {
+    if (i % 2 === 1 || !trWorthy(p)) return p;
+    const m = p.match(/^(\s*)([\s\S]*?)(\s*)$/);
+    const o = await translateText(m[2], tl);
+    return o ? m[1] + o + m[3] : p;
+  }));
+  return done.join('');
+}
+async function trLine(line, tl) {
+  const m = line.match(/^([^A-Za-z\u00C0-\u024F]*)([\s\S]*?)([^A-Za-z\u00C0-\u024F]*)$/);
+  if (!m || !m[2] || !trWorthy(m[2])) return line;
+  const out = await translateTemplate(m[2], tl);
+  return out ? m[1] + out + m[3] : line;
+}
+async function trMarkup(text, tl, html) {
+  if (!html) return (await Promise.all(text.split('\n').map((l) => trLine(l, tl)))).join('\n');
+  const parts = text.split(/(<[^>]+>)/);
+  let skip = 0;
+  const jobs = parts.map((p) => {
+    if (/^<[^>]+>$/.test(p)) {
+      if (/^<(code|pre|blockquote)[\s>]/i.test(p)) skip++;
+      else if (/^<\/(code|pre|blockquote)>/i.test(p)) skip = Math.max(0, skip - 1);
+      return Promise.resolve(p);
+    }
+    if (skip || !p.trim()) return Promise.resolve(p);
+    const dec = p.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+    return Promise.all(dec.split('\n').map((l) => trLine(l, tl))).then((ls) => ls.join('\n').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+  });
+  return (await Promise.all(jobs)).join('');
+}
+const userLangOf = (u) => (u && u.lang === 'id' ? 'id' : u && u.lang && TR_LANGS[u.lang] ? u.lang : 'en'); // default Inggris
+async function localizeText(u, text, html) {
+  const L = userLangOf(u);
+  if (L === 'id' || !text) return text;
+  try {
+    return await Promise.race([trMarkup(String(text), TR_LANGS[L], !!html), new Promise((r) => setTimeout(() => r(text), 6000))]);
+  } catch (e) {
+    return text;
+  }
+}
+async function localizeMarkup(u, rm) {
+  if (userLangOf(u) === 'id' || !rm || !Array.isArray(rm.inline_keyboard)) return rm;
+  const rows = await Promise.all(rm.inline_keyboard.map((row) => Promise.all(row.map(async (b) => (b && b.text ? { ...b, text: await localizeText(u, b.text, false) } : b)))));
+  return { ...rm, inline_keyboard: rows };
+}
+// Bahasa pilihan di Mini App tersimpan di akun -> semua notifikasi bot memakai bahasa itu
+function touchLang(u, req) {
+  const L = String((req && req.get && req.get('x-lang')) || '').toLowerCase().slice(0, 5);
+  if (u && L && (L === 'id' || TR_LANGS[L]) && u.lang !== L) {
+    u.lang = L;
+    saveUser(u);
+  }
+}
+// Bungkus bot agar semua pesan/caption/tombol otomatis diterjemahkan ke bahasa user
+(function patchBotLocalization() {
+  const uOf = (chatId) => users.get(String(chatId));
+  const html = (o) => !!o && String(o.parse_mode || '').toUpperCase() === 'HTML';
+  const oSend = bot.sendMessage.bind(bot);
+  bot.sendRaw = oSend; // kirim apa adanya (tanpa terjemahan otomatis)
+  const oPhoto = bot.sendPhoto.bind(bot);
+  const oDoc = bot.sendDocument.bind(bot);
+  const oEditCap = bot.editMessageCaption.bind(bot);
+  const oEditTxt = bot.editMessageText.bind(bot);
+  bot.sendMessage = async (chatId, text, opts) => {
+    const u = uOf(chatId);
+    if (userLangOf(u) === 'id') return oSend(chatId, text, opts);
+    const o = opts ? { ...opts } : undefined;
+    const t = await localizeText(u, text, html(o));
+    if (o && o.reply_markup) o.reply_markup = await localizeMarkup(u, o.reply_markup);
+    return oSend(chatId, t, o);
+  };
+  const mediaWrap = (orig) => async (chatId, media, opts, fileOpts) => {
+    const u = uOf(chatId);
+    if (userLangOf(u) === 'id' || !opts) return orig(chatId, media, opts, fileOpts);
+    const o = { ...opts };
+    if (o.caption) o.caption = await localizeText(u, o.caption, html(o));
+    if (o.reply_markup) o.reply_markup = await localizeMarkup(u, o.reply_markup);
+    return orig(chatId, media, o, fileOpts);
+  };
+  bot.sendPhoto = mediaWrap(oPhoto);
+  bot.sendDocument = mediaWrap(oDoc);
+  bot.editMessageCaption = async (caption, opts) => {
+    const u = opts && uOf(opts.chat_id);
+    if (!u || userLangOf(u) === 'id') return oEditCap(caption, opts);
+    const o = { ...opts };
+    const c = await localizeText(u, caption, html(o));
+    if (o.reply_markup) o.reply_markup = await localizeMarkup(u, o.reply_markup);
+    return oEditCap(c, o);
+  };
+  bot.editMessageText = async (text, opts) => {
+    const u = opts && uOf(opts.chat_id);
+    if (!u || userLangOf(u) === 'id') return oEditTxt(text, opts);
+    const o = { ...opts };
+    const t = await localizeText(u, text, html(o));
+    if (o.reply_markup) o.reply_markup = await localizeMarkup(u, o.reply_markup);
+    return oEditTxt(t, o);
+  };
+})();
+
 const runtimes = new Map();
 let rentalConfig = { ...DEFAULT_RENTAL_CONFIG };
 const rentalOrders = new Map();
@@ -835,6 +1062,56 @@ function trendIsUp(m) {
   const e20 = lastOf(EMA.calculate({ values: closes, period: 20 }));
   const e50 = lastOf(EMA.calculate({ values: closes, period: 50 }));
   return !(Number.isFinite(e20) && Number.isFinite(e50)) || e20 > e50;
+}
+
+// ---------- Konfirmasi sinyal bertingkat per paket ----------
+// Makin tinggi paket, makin banyak syarat yang harus terpenuhi sebelum BUY otomatis
+// (lebih sedikit sinyal palsu). Ini TIDAK menjamin profit; hanya memperketat entry.
+//  Starter: tanpa konfirmasi tambahan
+//  Trader : RSI mulai naik + candle terakhir naik (pembalikan terkonfirmasi)
+//  Pro    : + histogram MACD menguat + volatilitas (ATR) tidak ekstrem
+//  Elite  : + tren naik (EMA20>EMA50) ATAU harga jauh di bawah rata-rata Bollinger
+const CONFIRM_LEVEL = { starter: 0, trader: 1, pro: 2, elite: 3 };
+function confirmEntry(m, tier) {
+  const lvl = CONFIRM_LEVEL[tier] || 0;
+  if (lvl === 0) return { ok: true, level: 0 };
+  const closes = (m && m.closes) || [], highs = (m && m.highs) || [], lows = (m && m.lows) || [];
+  const rs = (m && m.rsiSeries) || [];
+  const n = closes.length;
+  if (n < 65 || rs.length < 2) return { ok: true, level: lvl }; // data kurang: jangan memblokir
+  if (!(rs[rs.length - 1] > rs[rs.length - 2] && closes[n - 1] > closes[n - 2])) return { ok: false, level: lvl, why: 'menunggu pembalikan' };
+  if (lvl >= 2) {
+    const mc = MACD.calculate({ values: closes, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, SimpleMAOscillator: false, SimpleMASignal: false });
+    const a = lastOf(mc), b = lastOf(mc, 1);
+    if (!a || !b || !Number.isFinite(a.histogram) || !Number.isFinite(b.histogram)) return { ok: true, level: lvl };
+    if (!(a.histogram > b.histogram)) return { ok: false, level: lvl, why: 'momentum MACD belum menguat' };
+    const tr = (i) => Math.max(highs[i] - lows[i], Math.abs(highs[i] - closes[i - 1]), Math.abs(lows[i] - closes[i - 1]));
+    let sum = 0;
+    for (let i = n - 51; i < n - 1; i++) sum += tr(i);
+    const avgTr = sum / 50;
+    if (avgTr > 0 && Number.isFinite(tr(n - 1)) && tr(n - 1) > 2 * avgTr) return { ok: false, level: lvl, why: 'volatilitas terlalu ekstrem' };
+  }
+  if (lvl >= 3) {
+    const e20 = lastOf(EMA.calculate({ values: closes, period: 20 }));
+    const e50 = lastOf(EMA.calculate({ values: closes, period: 50 }));
+    const bb = lastOf(BollingerBands.calculate({ values: closes, period: 20, stdDev: 2 }));
+    const up = Number.isFinite(e20) && Number.isFinite(e50) && e20 > e50;
+    const deep = bb && Number.isFinite(bb.middle) && closes[n - 1] <= bb.middle - (bb.middle - bb.lower) * 0.75;
+    if (!(up || deep)) return { ok: false, level: lvl, why: 'belum searah tren / belum cukup murah' };
+  }
+  return { ok: true, level: lvl };
+}
+
+// ---------- Perjanjian risiko trading (wajib sebelum kirim pembayaran) ----------
+const AGREEMENT_VERSION = '2026-11-v1';
+function validateAgreement(a) {
+  if (!a || a.accepted !== true) {
+    throw new Error('Anda harus membaca dan mencentang persetujuan Perjanjian Risiko Trading sebelum mengirim pembayaran.');
+  }
+  if (String(a.version || '') !== AGREEMENT_VERSION) {
+    throw new Error('Versi perjanjian sudah diperbarui. Tutup lalu buka ulang Mini App, kemudian centang lagi.');
+  }
+  return { version: AGREEMENT_VERSION };
 }
 
 const isProUp = (u) => ['pro', 'elite'].includes(getUserTier(u));
@@ -965,6 +1242,7 @@ function newUser(from) {
     lastLoginAt: 0,
     rentalExpiresAt: isAdminId(idStr) ? Date.now() + 100 * 365 * 86400000 : 0,
     rentalPlanName: isAdminId(idStr) ? 'OWNER UNLIMITED' : '',
+    lang: (() => { const c = String(from.language_code || '').slice(0, 2).toLowerCase(); return c && c !== 'id' && TR_LANGS[c] ? c : ''; })(),
     liveBotStatus: true, // Poin 5: kirim/update status & grafik realtime di chat bot
     createdAt: new Date(),
     broker: 'binance_testnet',
@@ -1566,6 +1844,7 @@ async function getMarketForUser(u) {
         baseMkt.closes[idx],
       ]);
       entry.data = computeMarketFromCandles(rawCandles, livePrice);
+      if (baseMkt.simulated) entry.data.simulated = true;
       entry.at = Date.now();
       return entry.data;
     }
@@ -1796,6 +2075,8 @@ function setAuto(u, on, src) {
     throw fail(`Aset ${info.asset.name} hanya tersedia di broker MT4/MT5`, 'UNSUPPORTED');
   }
   u.isAutoTrade = !!on;
+  if (!u.autoByBroker || typeof u.autoByBroker !== 'object') u.autoByBroker = {};
+  u.autoByBroker[u.broker] = !!on;
   rt(u._id).fails = 0;
   saveUser(u);
   notify(
@@ -1842,7 +2123,11 @@ function selectBroker(u, brokerId, mtSymbolInput) {
   if (u.position && u.broker !== brokerId) {
     throw new Error(`Tutup posisi aktif di ${getBrokerCfg(u.broker).name} dulu sebelum mengganti broker`);
   }
-  const prevIsMt = getBrokerCfg(u.broker).isMt;
+  const prevBroker = u.broker;
+  const prevIsMt = getBrokerCfg(prevBroker).isMt;
+  // Ingat status Auto-Trade tiap broker agar ON/OFF ikut berpindah bersama broker (aman: Live tidak otomatis ON).
+  if (!u.autoByBroker || typeof u.autoByBroker !== 'object') u.autoByBroker = {};
+  u.autoByBroker[prevBroker] = !!u.isAutoTrade;
   u.broker = brokerId;
   const info = getUserTradeInfo(u);
 
@@ -1860,9 +2145,10 @@ function selectBroker(u, brokerId, mtSymbolInput) {
     u.settings.amount = updatedInfo.defaultAmount;
   }
 
-  if (!hasBrokerKeys(u, brokerId) || !updatedInfo.supportedOnBroker) {
-    u.isAutoTrade = false;
-  }
+  // Auto-Trade broker tujuan = status terakhir broker itu sendiri (jika kredensial & aset didukung).
+  u.isAutoTrade =
+    !!u.autoByBroker[brokerId] && hasBrokerKeys(u, brokerId) && updatedInfo.supportedOnBroker && isRentalActive(u);
+  u.autoByBroker[brokerId] = u.isAutoTrade;
 
   const r = rt(u._id);
   r.adapter = null;
@@ -2238,6 +2524,7 @@ async function snapshot(u) {
     rentalConfig: {
       requireRental: rentalConfig.requireRental,
       autoApprove: rentalConfig.autoApprove,
+      autoVerify: rentalConfig.autoVerify !== false,
       instructions: rentalConfig.instructions,
       packages: rentalConfig.packages,
       paymentMethods: rentalConfig.paymentMethods,
@@ -2489,6 +2776,12 @@ const csChats = new Map();
 const csHits = new Map();
 setInterval(() => csHits.clear(), 60 * 1000).unref();
 const CS_MAX_LEN = 1000;
+const csAdminMsgs = new Map(); // `${adminId}:${message_id}` -> userId (pesan CS yang dikirim ke admin)
+const csUserMsgs = new Set(); // `${userId}:${message_id}` (pesan CS yang dikirim ke user di bot)
+function csRemember(map, key, val) {
+  if (map instanceof Set) map.add(key); else map.set(key, val);
+  if (map.size > 3000) { const k = map.keys().next().value; map.delete(k); }
+}
 function csAdd(userId, from, text) {
   const msg = { _id: crypto.randomBytes(6).toString('hex'), userId: String(userId), from, text: String(text).slice(0, CS_MAX_LEN), at: Date.now() };
   const arr = csChats.get(msg.userId) || [];
@@ -2521,10 +2814,11 @@ async function csFromUser(u, rawText) {
         `💬 <b>Chat Customer Service</b>\n` +
           `Dari: <b>${esc(u.name)}</b>${u.username ? ' (@' + esc(u.username) + ')' : ''}\n` +
           `ID: <code>${u._id}</code>\n` +
-          `Paket: ${esc(u.rentalPlanName || '-')}\n\n${esc(text)}\n\n` +
+          `Paket: ${esc(u.rentalPlanName || '-')}\n\n<blockquote>${esc(text)}</blockquote>\n\n` +
           `↩︎ <i>Reply pesan ini untuk membalas, atau /balas ${u._id} teks</i>`,
         { parse_mode: 'HTML' }
       )
+      .then((sent) => { if (sent && sent.message_id) csRemember(csAdminMsgs, `${admId}:${sent.message_id}`, String(u._id)); })
       .catch(() => {});
   }
 }
@@ -2535,7 +2829,8 @@ async function csFromAdmin(adminId, targetId, rawText) {
   if (!text) return bot.sendMessage(adminId, '✕ Isi balasan kosong.');
   csAdd(t._id, 'cs', text);
   logActivity('CS_REPLY', t._id, t.name, `Dibalas CS oleh ${adminId}`);
-  await bot.sendMessage(t._id, `💬 <b>Customer Service:</b>\n${esc(text)}`, { parse_mode: 'HTML' }).catch(() => {});
+  const sentToUser = await bot.sendMessage(t._id, `💬 <b>Customer Service:</b>\n<blockquote>${esc(text)}</blockquote>`, { parse_mode: 'HTML' }).catch(() => null);
+  if (sentToUser && sentToUser.message_id) csRemember(csUserMsgs, `${t._id}:${sentToUser.message_id}`);
   return bot.sendMessage(adminId, `✓ Balasan terkirim ke <code>${t._id}</code> (${esc(t.name)}).`, { parse_mode: 'HTML' });
 }
 
@@ -2561,13 +2856,42 @@ bot.onText(/^\/balas(@\w+)?\s+(\d+)\s+([\s\S]+)$/, async (msg, m) => {
 });
 bot.on('message', async (msg) => {
   try {
-    if (!msg || msg.chat.type !== 'private' || !msg.text || /^\//.test(msg.text)) return;
-    if (!isAdminId(msg.from.id) || !msg.reply_to_message) return;
-    const src = String(msg.reply_to_message.text || '');
-    if (!/Chat Customer Service/.test(src)) return;
-    const idm = src.match(/ID:\s*(\d+)/);
-    if (!idm) return;
-    await csFromAdmin(String(msg.from.id), idm[1], msg.text);
+    if (!msg || msg.chat.type !== 'private' || !msg.text || /^\//.test(msg.text) || !msg.reply_to_message) return;
+    const rep = msg.reply_to_message;
+    // A) Admin membalas pesan CS -> masuk ke Mini App user (+ chat bot user)
+    if (isAdminId(msg.from.id)) {
+      let target = csAdminMsgs.get(`${msg.chat.id}:${rep.message_id}`) || '';
+      if (!target && rep.from && rep.from.is_bot) {
+        // cadangan setelah server restart / pesan sudah diterjemahkan: ambil ID dari entity <code> atau angka panjang pertama
+        const src = String(rep.text || '');
+        const ents = Array.isArray(rep.entities) ? rep.entities : [];
+        for (const e of ents) {
+          if (e.type === 'code') {
+            const v = src.substr(e.offset, e.length).trim();
+            if (/^\d{5,15}$/.test(v) && users.get(v)) { target = v; break; }
+          }
+        }
+        if (!target) {
+          const m = src.match(/\d{6,15}/g) || [];
+          target = m.find((v) => users.get(v) && !isAdminId(v)) || '';
+        }
+        if (target && !/Customer|Pelanggan|Service|CS|Chat/i.test(src) && !ents.some((e) => e.type === 'blockquote')) target = '';
+      }
+      if (!target) return;
+      await csFromAdmin(String(msg.from.id), target, msg.text);
+      return;
+    }
+    // B) User membalas pesan "Customer Service" di bot -> diteruskan ke admin + tampil di Mini App
+    if (csUserMsgs.has(`${msg.chat.id}:${rep.message_id}`)) {
+      const u = await ensureUser(msg.from);
+      if (!u) return;
+      try {
+        await csFromUser(u, msg.text);
+        await bot.sendMessage(msg.chat.id, '✓ Pesan terkirim ke Customer Service.');
+      } catch (e) {
+        await bot.sendMessage(msg.chat.id, `✕ ${esc(e.message)}`, { parse_mode: 'HTML' });
+      }
+    }
   } catch (e) {
     console.error('CS reply:', e.message);
   }
@@ -2656,7 +2980,10 @@ bot.on('callback_query', async (q) => {
     } else if (q.data === 'toggle_auto') {
       setAuto(u, !u.isAutoTrade, 'bot');
     } else if (q.data === 'cycle_broker') {
-      const order = Object.keys(BROKERS);
+      const order = Object.keys(BROKERS).filter((id) => id === u.broker || hasBrokerKeys(u, id));
+      if (order.length < 2) {
+        return notify(u, 'ℹ︎ Belum ada broker lain yang terhubung. Hubungkan broker lain di Mini App (menu Home > Broker).');
+      }
       const nextIdx = (order.indexOf(u.broker) + 1) % order.length;
       selectBroker(u, order[nextIdx]);
     } else if (q.data === 'cycle_asset') {
@@ -2716,6 +3043,273 @@ function verifyInitData(initData) {
 const hits = new Map();
 setInterval(() => hits.clear(), 60 * 1000).unref();
 
+
+// ---------- Auto cek TxHash / ID transaksi (on-chain, USDT/USDC) -> auto approve bila cocok ----------
+const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function tronToHex20(addr) {
+  let n = 0n;
+  for (const ch of String(addr || '').trim()) {
+    const i = B58.indexOf(ch);
+    if (i < 0) return '';
+    n = n * 58n + BigInt(i);
+  }
+  const hex = n.toString(16).padStart(50, '0'); // 1 byte prefix + 20 byte + 4 byte checksum = 25 byte
+  return hex.slice(2, 42).toLowerCase();
+}
+const TRANSFER_SIG = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+const EVM_CHAINS = {
+  bep20: { name: 'BSC (BEP20)', rpc: ['https://bsc-dataseed.binance.org', 'https://bsc-dataseed1.defibit.io', 'https://bsc-rpc.publicnode.com'],
+    tokens: { '0x55d398326f99059ff775485246999027b3197955': { sym: 'USDT', dec: 18 }, '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d': { sym: 'USDC', dec: 18 } } },
+  erc20: { name: 'Ethereum (ERC20)', rpc: ['https://ethereum-rpc.publicnode.com', 'https://cloudflare-eth.com'],
+    tokens: { '0xdac17f958d2ee523a2206206994597c13d831ec7': { sym: 'USDT', dec: 6 }, '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48': { sym: 'USDC', dec: 6 } } },
+  polygon: { name: 'Polygon', rpc: ['https://polygon-rpc.com', 'https://polygon-bor-rpc.publicnode.com'],
+    tokens: { '0xc2132d05d31c914a87c6611c10748aeb04b58e8f': { sym: 'USDT', dec: 6 }, '0x3c499c542cef5e3811e1192ce70d8cc03d5c3359': { sym: 'USDC', dec: 6 } } },
+};
+const TRON_USDT_HEX = tronToHex20('TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t');
+const CHAIN_LABELS = { trc20: 'TRON (TRC20)', ...Object.fromEntries(Object.entries(EVM_CHAINS).map(([k, v]) => [k, v.name])) };
+const VERIFY_WINDOW_MS = 30 * 60 * 1000;
+const vTimeout = (ms) => (AbortSignal.timeout ? AbortSignal.timeout(ms) : undefined);
+
+async function evmRpc(chain, method, params) {
+  let last = null;
+  for (const url of EVM_CHAINS[chain].rpc) {
+    try {
+      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: vTimeout(8000) });
+      const j = await r.json();
+      if (j && !j.error) return j.result;
+      last = new Error((j && j.error && j.error.message) || 'rpc error');
+    } catch (e) { last = e; }
+  }
+  throw last || new Error('rpc gagal');
+}
+const decBig = (hex, dec) => Number(BigInt(hex || '0x0')) / Math.pow(10, dec);
+
+// hasil: { status: 'ok' | 'notfound' | 'mismatch' | 'manual', reason, amount, symbol }
+async function verifyTx(proof, method, expectUsd) {
+  const chain = String((method && method.chain) || '').toLowerCase();
+  const wallet = String((method && method.account) || '').trim();
+  if (!chain || !CHAIN_LABELS[chain] || !wallet) return { status: 'manual', reason: 'Metode ini tidak dicek otomatis (bukan jaringan crypto yang didukung).' };
+  if (!(expectUsd > 0)) return { status: 'manual', reason: 'Harga paket bukan USDT/USDC, tidak bisa dicek otomatis.' };
+  const tol = 0.01;
+  try {
+    if (chain === 'trc20') {
+      const m = String(proof).match(/\b[a-fA-F0-9]{64}\b/);
+      if (!m) return { status: 'mismatch', reason: 'Format TxHash TRON tidak valid (harus 64 karakter hex).' };
+      const to20 = tronToHex20(wallet);
+      if (!to20) return { status: 'manual', reason: 'Alamat wallet admin tidak valid.' };
+      const r = await fetch('https://api.trongrid.io/wallet/gettransactioninfobyid', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ value: m[0] }), signal: vTimeout(8000) });
+      const j = await r.json();
+      if (!j || !j.id) return { status: 'notfound', reason: 'Transaksi belum ditemukan di jaringan TRON.' };
+      if (j.receipt && j.receipt.result && j.receipt.result !== 'SUCCESS') return { status: 'mismatch', reason: 'Transaksi TRON gagal (' + j.receipt.result + ').' };
+      for (const lg of j.log || []) {
+        const topics = (lg.topics || []).map((t) => String(t).toLowerCase().replace(/^0x/, ''));
+        if (String(lg.address || '').toLowerCase().replace(/^41/, '') !== TRON_USDT_HEX && String(lg.address || '').toLowerCase() !== TRON_USDT_HEX) continue;
+        if (topics.length < 3 || topics[0] !== TRANSFER_SIG.replace(/^0x/, '')) continue;
+        if (topics[2].slice(-40) !== to20) continue;
+        const amt = decBig('0x' + (lg.data || '0'), 6);
+        if (amt + tol >= expectUsd) return { status: 'ok', amount: amt, symbol: 'USDT', reason: 'TRC20 USDT ' + amt + ' diterima.' };
+        return { status: 'mismatch', reason: 'Nominal kurang: terkirim ' + amt + ' USDT, harga ' + expectUsd + '.' };
+      }
+      return { status: 'mismatch', reason: 'Tidak ada transfer USDT TRC20 ke wallet pembayaran pada transaksi ini.' };
+    }
+    const m = String(proof).match(/0x[a-fA-F0-9]{64}/);
+    if (!m) return { status: 'mismatch', reason: 'Format TxHash tidak valid (harus 0x + 64 karakter hex).' };
+    const rc = await evmRpc(chain, 'eth_getTransactionReceipt', [m[0]]);
+    if (!rc) return { status: 'notfound', reason: 'Transaksi belum ditemukan / belum terkonfirmasi di ' + EVM_CHAINS[chain].name + '.' };
+    if (rc.status !== '0x1') return { status: 'mismatch', reason: 'Transaksi gagal di jaringan.' };
+    const head = Number(BigInt(await evmRpc(chain, 'eth_blockNumber', [])));
+    if (head - Number(BigInt(rc.blockNumber)) < 1) return { status: 'notfound', reason: 'Menunggu konfirmasi blok.' };
+    const wl = wallet.toLowerCase();
+    for (const lg of rc.logs || []) {
+      const tk = EVM_CHAINS[chain].tokens[String(lg.address || '').toLowerCase()];
+      if (!tk || !lg.topics || lg.topics[0] !== TRANSFER_SIG || lg.topics.length < 3) continue;
+      if ('0x' + String(lg.topics[2]).slice(-40).toLowerCase() !== wl) continue;
+      const amt = decBig(lg.data, tk.dec);
+      if (amt + tol >= expectUsd) return { status: 'ok', amount: amt, symbol: tk.sym, reason: tk.sym + ' ' + amt + ' diterima.' };
+      return { status: 'mismatch', reason: 'Nominal kurang: terkirim ' + amt + ' ' + tk.sym + ', harga ' + expectUsd + '.' };
+    }
+    return { status: 'mismatch', reason: 'Tidak ada transfer USDT/USDC ke wallet pembayaran pada transaksi ini.' };
+  } catch (e) {
+    return { status: 'notfound', reason: 'Gagal menghubungi jaringan: ' + e.message };
+  }
+}
+function txKeyOf(proof) {
+  const m = String(proof || '').match(/0x[a-fA-F0-9]{64}|\b[a-fA-F0-9]{64}\b/);
+  return m ? m[0].toLowerCase() : '';
+}
+const usdOfPrice = (p) => (/(usdt|usdc|usd|\$)/i.test(String(p || '')) ? parseFloat(String(p).replace(',', '.').replace(/[^0-9.]/g, '')) || 0 : 0);
+// Cek ulang order yang masih menunggu (belum terdeteksi di jaringan) tiap menit sampai 30 menit
+async function sweepVerifyOrders() {
+  if (!rentalConfig.autoVerify) return;
+  for (const ord of [...rentalOrders.values()]) {
+    if (ord.status !== 'pending' || !ord.verifyUntil || ord.verifyUntil < Date.now() || ord.verifyDone) continue;
+    const pm = (rentalConfig.paymentMethods || []).find((m) => m.id === ord.methodId) || (rentalConfig.paymentMethods || []).find((m) => m.name === ord.methodName);
+    const res = await verifyTx(ord.txProof, pm, usdOfPrice(ord.price));
+    ord.verifyNote = res.reason;
+    if (res.status === 'ok') {
+      ord.verifyDone = true;
+      await approveRentalOrder(ord._id, 'AUTO-VERIFY').catch((e) => console.error('Auto verify approve:', e.message));
+    } else if (res.status === 'mismatch' || res.status === 'manual') {
+      ord.verifyDone = true;
+      notifyAdminsVerify(ord, res.reason);
+    }
+  }
+}
+function notifyAdminsVerify(ord, reason) {
+  for (const admId of ADMIN_IDS) {
+    bot.sendMessage(admId, `⚠︎ <b>Cek otomatis TxHash belum lolos</b>\nOrder: <code>${esc(ord._id)}</code> · User <code>${esc(ord.userId)}</code>\nAlasan: ${esc(reason)}\nSilakan cek manual lewat Admin > Antrean Pembayaran.`, { parse_mode: 'HTML' }).catch(() => {});
+  }
+}
+setInterval(() => { sweepVerifyOrders().catch((e) => console.error('Sweep verify:', e.message)); }, 60 * 1000).unref();
+
+
+// ---------- Harga realtime semua aset (harga asli pasar; tanpa data buatan) ----------
+const livePrices = new Map(); // assetId -> { price, prev, changePct, at, src }
+let livePricesWantedAt = 0;
+let livePricesBusy = false;
+const BINANCE_HOSTS = ['https://api.binance.com', 'https://data-api.binance.vision', 'https://api1.binance.com'];
+async function fetchBinance24h(symbols) {
+  const q = encodeURIComponent(JSON.stringify(symbols));
+  let last = null;
+  for (const host of BINANCE_HOSTS) {
+    try {
+      const r = await fetch(`${host}/api/v3/ticker/24hr?symbols=${q}`, { signal: AbortSignal.timeout(6000) });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return await r.json();
+    } catch (e) { last = e; }
+  }
+  throw last || new Error('Binance gagal');
+}
+async function fetchYahooQuote(ticker) {
+  const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1m&range=1d`, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(8000) });
+  if (!r.ok) throw new Error('Yahoo HTTP ' + r.status);
+  const j = await r.json();
+  const meta = j && j.chart && j.chart.result && j.chart.result[0] && j.chart.result[0].meta;
+  const price = Number(meta && meta.regularMarketPrice);
+  const prev = Number(meta && (meta.chartPreviousClose || meta.previousClose));
+  if (!(price > 0)) throw new Error('Harga Yahoo kosong');
+  return { price, prev: prev > 0 ? prev : 0, at: Number(meta.regularMarketTime) * 1000 || Date.now() };
+}
+const YAHOO_OVERRIDE = { XAUUSD: ['XAUUSD=X', 'GC=F'], XAGUSD: ['XAGUSD=X', 'SI=F'] };
+function setLive(id, price, prev, src, at) {
+  if (!(price > 0)) return;
+  livePrices.set(id, { price, prev: prev > 0 ? prev : 0, changePct: prev > 0 ? ((price - prev) / prev) * 100 : 0, at: at || Date.now(), src });
+}
+let liveCycle = 0;
+async function refreshLivePrices() {
+  if (livePricesBusy) return;
+  livePricesBusy = true;
+  try {
+    liveCycle++;
+    const crypto = Object.values(ASSETS).filter((a) => a.category === 'crypto' && a.spotSymbol);
+    let cryptoOk = new Set();
+    try {
+      const rows = await fetchBinance24h(crypto.map((a) => a.spotSymbol.replace('/', '')));
+      for (const row of rows) {
+        const a = crypto.find((x) => x.spotSymbol.replace('/', '') === row.symbol);
+        if (a) { setLive(a.id, Number(row.lastPrice), Number(row.openPrice), 'binance'); cryptoOk.add(a.id); }
+      }
+    } catch (e) { /* jatuh ke Yahoo di bawah */ }
+    // Komoditas/forex (dan crypto yang gagal) dari Yahoo, tiap ~9 detik agar tidak kena limit
+    if (liveCycle % 3 === 1) {
+      const todo = Object.values(ASSETS).filter((a) => !cryptoOk.has(a.id) && (a.yahoo || YAHOO_OVERRIDE[a.id]));
+      await runPool(todo, 4, async (a) => {
+        for (const tk of YAHOO_OVERRIDE[a.id] || [a.yahoo]) {
+          try { const q = await fetchYahooQuote(tk); setLive(a.id, q.price, q.prev, 'yahoo', q.at); return; } catch (e) { /* coba berikutnya */ }
+        }
+      });
+    }
+  } finally {
+    livePricesBusy = false;
+  }
+}
+setInterval(() => {
+  if (Date.now() - livePricesWantedAt < 120000) refreshLivePrices().catch(() => {});
+}, 3000).unref();
+
+app.get('/api/prices', async (req, res) => {
+  try {
+    const ip = clientIp(req);
+    const k = 'pr:' + ip;
+    hits.set(k, (hits.get(k) || 0) + 1);
+    if (hits.get(k) > 90) return res.status(429).json({ ok: false, error: 'Terlalu sering' });
+    const cold = Date.now() - livePricesWantedAt > 120000 || !livePrices.size;
+    livePricesWantedAt = Date.now();
+    if (cold) { liveCycle = 0; await refreshLivePrices().catch(() => {}); }
+    const out = {};
+    for (const a of Object.values(ASSETS)) {
+      const p = livePrices.get(a.id);
+      out[a.id] = p ? { price: p.price, changePct: p.changePct, at: p.at, src: p.src } : null;
+    }
+    res.set('Cache-Control', 'no-store');
+    return res.json({ ok: true, now: Date.now(), prices: out });
+  } catch (e) {
+    return res.status(500).json({ ok: false });
+  }
+});
+
+
+// ---------- Deteksi bahasa dari lokasi IP (default Inggris bila negara tidak ada di menu bahasa) ----------
+const COUNTRY_LANG = (() => {
+  const m = {};
+  const add = (lang, list) => list.split(' ').forEach((c) => { m[c] = lang; });
+  add('id', 'ID');
+  add('en', 'US GB AU CA NZ IE SG ZW');
+  add('es', 'ES MX AR CO CL PE VE EC GT CU BO DO HN PY SV NI CR PA UY PR GQ');
+  add('de', 'DE AT CH LI');
+  add('fr', 'FR BE LU MC SN CI CM CD MG HT');
+  add('tr', 'TR');
+  add('uz', 'UZ');
+  add('ru', 'RU BY KZ KG');
+  add('vi', 'VN');
+  add('tl', 'PH');
+  add('th', 'TH');
+  add('ms', 'MY BN');
+  add('hi', 'IN');
+  add('ur', 'PK');
+  add('zh', 'CN TW HK MO');
+  add('ko', 'KR');
+  add('ja', 'JP');
+  add('af', 'ZA NA');
+  add('ar', 'SA AE EG IQ JO KW QA BH OM YE LB SY LY DZ MA TN SD PS MR');
+  return m;
+})();
+const geoCache = new Map(); // ip -> { country, at }
+async function countryOfIp(req) {
+  const hdr = String(req.get('x-vercel-ip-country') || req.get('cf-ipcountry') || '').toUpperCase();
+  if (/^[A-Z]{2}$/.test(hdr) && hdr !== 'XX') return hdr;
+  const ip = clientIp(req);
+  if (!ip || ip === 'unknown' || /^(10\.|127\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|fc|fd)/i.test(ip)) return '';
+  const c = geoCache.get(ip);
+  if (c && Date.now() - c.at < 6 * 3600 * 1000) return c.country;
+  let country = '';
+  const tryUrl = async (url, pick) => {
+    if (country) return;
+    try {
+      const r = await fetch(url, { signal: AbortSignal.timeout(4000) });
+      if (!r.ok) return;
+      const v = String(pick(await r.json()) || '').toUpperCase();
+      if (/^[A-Z]{2}$/.test(v)) country = v;
+    } catch (e) { /* coba sumber berikutnya */ }
+  };
+  await tryUrl(`https://api.country.is/${encodeURIComponent(ip)}`, (j) => j && j.country);
+  await tryUrl(`https://ipwho.is/${encodeURIComponent(ip)}`, (j) => j && j.success !== false && j.country_code);
+  await tryUrl(`https://ipapi.co/${encodeURIComponent(ip)}/country/`.replace(/\/country\/$/, '/json/'), (j) => j && j.country_code);
+  if (geoCache.size > 5000) geoCache.clear();
+  geoCache.set(ip, { country, at: Date.now() });
+  return country;
+}
+app.get('/api/geo', async (req, res) => {
+  try {
+    const country = await countryOfIp(req);
+    const lang = COUNTRY_LANG[country] || 'en';
+    res.set('Cache-Control', 'no-store');
+    return res.json({ ok: true, country, lang });
+  } catch (e) {
+    return res.json({ ok: true, country: '', lang: 'en' });
+  }
+});
+
 // ---------- Endpoint Publik: Paket Sewa & Pengajuan ----------
 app.get('/api/rental/public-config', (req, res) => {
   res.json({
@@ -2723,6 +3317,7 @@ app.get('/api/rental/public-config', (req, res) => {
     rentalConfig: {
       requireRental: rentalConfig.requireRental,
       autoApprove: rentalConfig.autoApprove,
+      autoVerify: rentalConfig.autoVerify !== false,
       instructions: rentalConfig.instructions,
       packages: rentalConfig.packages,
       paymentMethods: rentalConfig.paymentMethods,
@@ -2767,6 +3362,7 @@ app.post('/api/rental/order', async (req, res) => {
     const pm =
       (rentalConfig.paymentMethods || []).find((m) => m.id === body.methodId) ||
       rentalConfig.paymentMethods[0] || { name: 'Transfer Manual' };
+    const agreement = validateAgreement(body.agreement);
     const txProof = String(body.txProof || '').trim();
     if (txProof.length < 3) {
       return res.status(400).json({
@@ -2775,6 +3371,10 @@ app.post('/api/rental/order', async (req, res) => {
       });
     }
 
+    const dupKey = txKeyOf(txProof);
+    if (dupKey && [...rentalOrders.values()].some((o) => o.txKey === dupKey && o.status !== 'rejected')) {
+      return res.status(400).json({ ok: false, error: 'TxHash / ID transaksi ini sudah pernah dipakai pada pengajuan lain.' });
+    }
     const orderId = 'RNT' + Date.now().toString(36).toUpperCase();
     const ord = {
       _id: orderId,
@@ -2788,9 +3388,18 @@ app.post('/api/rental/order', async (req, res) => {
       tier: inferTier(pkg),
       durationHours: Number(pkg.durationHours) || 24,
       methodName: pm.name,
+      methodId: pm.id || '',
       txProof,
+      txKey: txKeyOf(txProof),
       status: 'pending',
       createdAt: Date.now(),
+      agreement: {
+        ...agreement,
+        acceptedAt: Date.now(),
+        ip: clientIp(req),
+        ua: String(req.get('user-agent') || '').slice(0, 160),
+        telegramId: u._id,
+      },
     };
     rentalOrders.set(orderId, ord);
     logActivity('RENTAL_ORDER', u._id, u.name, `Mengajukan sewa ${pkg.name} (${effectivePrice(pkg)}) via ${pm.name}`, { orderId });
@@ -2810,6 +3419,30 @@ app.post('/api/rental/order', async (req, res) => {
       });
     }
 
+    let verifyNote = '';
+    let verifyWaiting = false;
+    if (rentalConfig.autoVerify !== false && pm.chain && pm.chain !== 'manual') {
+      const vr = await verifyTx(txProof, pm, usdOfPrice(ord.price));
+      verifyNote = vr.reason || '';
+      if (vr.status === 'ok') {
+        await approveRentalOrder(orderId, 'AUTO-VERIFY');
+        return res.json({
+          ok: true,
+          autoApproved: true,
+          message: `Pembayaran terverifikasi otomatis! Paket ${pkg.name} aktif. Silakan Login.`,
+          ...(tgUser && u.pwAuto ? { password: revealAutoPassword(u) } : {}),
+          data: await snapshot(u),
+        });
+      }
+      if (vr.status === 'notfound') {
+        verifyWaiting = true;
+        ord.verifyUntil = Date.now() + VERIFY_WINDOW_MS;
+      } else {
+        ord.verifyDone = true;
+      }
+      ord.verifyNote = verifyNote;
+      if (rentalsCol) await rentalsCol.replaceOne({ _id: ord._id }, ord, { upsert: true }).catch(() => {});
+    }
     for (const admId of ADMIN_IDS) {
       bot
         .sendMessage(
@@ -2820,6 +3453,7 @@ app.post('/api/rental/order', async (req, res) => {
             `🏷 Paket: <b>${esc(pkg.name)}</b> (${pkg.durationHours} Jam · ${esc(effectivePrice(pkg))})\n` +
             `💳 Metode: ${esc(pm.name)}\n` +
             `🧾 Bukti/TxHash: <code>${esc(txProof)}</code>\n` +
+            (verifyNote ? `🔎 Cek otomatis: ${esc(verifyNote)}\n` : '') +
             `◷ Waktu: ${utcTimeStr()}`,
           {
             parse_mode: 'HTML',
@@ -2839,7 +3473,9 @@ app.post('/api/rental/order', async (req, res) => {
     return res.json({
       ok: true,
       autoApproved: false,
-      message: 'Bukti pembayaran sewa terkirim! Menunggu verifikasi Admin.',
+      message: verifyWaiting
+        ? 'Bukti terkirim. Transaksi belum terdeteksi di jaringan; sistem akan mengecek otomatis tiap menit (maks 30 menit) dan mengaktifkan paket jika cocok.'
+        : 'Bukti pembayaran sewa terkirim! Menunggu verifikasi Admin.',
       data: await snapshot(u),
     });
   } catch (e) {
@@ -2874,7 +3510,27 @@ app.post('/api/rental/trial', async (req, res) => {
       return res.status(403).json({ ok: false, error: 'IP Anda diblokir karena terdeteksi memakai uji coba lebih dari satu akun. Hubungi admin.' });
     }
     if (u.trialUsed) {
-      return res.status(400).json({ ok: false, error: 'Uji coba gratis sudah pernah Anda pakai. Silakan pilih paket berbayar.' });
+      // Penolakan dikirim ke chat bot dalam bahasa Inggris (tanpa terjemahan otomatis)
+      if (Date.now() - (trialRefuseAt.get(String(u._id)) || 0) > 60000) {
+        trialRefuseAt.set(String(u._id), Date.now());
+        bot.sendRaw(
+        u._id,
+        '⛔ You have already received the free trial.\nYou cannot claim it again. Please use another package.',
+        WEBAPP_URL ? { reply_markup: { inline_keyboard: [[{ text: 'Choose a package', web_app: { url: WEBAPP_URL } }]] } } : undefined
+        ).catch(() => {});
+      }
+      logActivity('TRIAL_REFUSED', u._id, u.name, 'Klaim uji coba ditolak: ID sudah pernah klaim');
+      return res.status(400).json({ ok: false, error: 'Anda sudah menerima uji coba. Silakan gunakan paket lain.' });
+    }
+    // Pastikan bot bisa mengirim pesan ke user (password dikirim lewat chat bot) sebelum uji coba dipakai
+    try {
+      await bot.sendChatAction(u._id, 'typing');
+    } catch (e) {
+      return res.status(400).json({ ok: false, error: 'Bot tidak bisa mengirim pesan ke Anda. Buka chat bot lalu tekan /start, kemudian coba lagi.' });
+    }
+    // Cek ulang setelah await: dua klik/permintaan bersamaan tidak boleh sama-sama lolos
+    if (u.trialUsed) {
+      return res.status(400).json({ ok: false, error: 'Anda sudah menerima uji coba. Silakan gunakan paket lain.' });
     }
     if ((!ent || ent.status !== 'whitelist') && ent && ent.status === 'used' && String(ent.userId) !== String(u._id)) {
       ent.status = 'blocked';
@@ -2894,49 +3550,39 @@ app.post('/api/rental/trial', async (req, res) => {
     u.rentalTier = 'starter';
     u.assetSlots = [];
     u.trialUsed = true;
+    const pwRes = ensureAutoPassword(u); // password acak (hanya bila user belum punya PIN)
     saveUser(u);
     const prev = ent || {};
     ipGuard[ip] = { ...prev, ip, status: prev.status === 'whitelist' ? 'whitelist' : 'used', userId: String(u._id), name: u.name, at: Date.now(), users: [...new Set([...(prev.users || []), String(u._id)])] };
     await saveIpGuard();
     logActivity('TRIAL_CLAIMED', u._id, u.name, `Uji coba 1 hari dari IP ${ip}`, { ip });
-    return res.json({ ok: true, message: 'Uji coba gratis 1 hari aktif! Silakan Login.', data: await snapshot(u) });
+    // Password acak dikirim ke chat bot milik ID Telegram yang mengklaim (tidak dikembalikan lewat API)
+    const trialMsg =
+      `🎁 <b>Uji coba gratis 1 hari aktif</b>\nBerlaku sampai <code>${utcTimeStr(u.rentalExpiresAt)}</code>.\n\n` +
+      (pwRes.created
+        ? `🔑 <b>Password Login Anda:</b> <code>${esc(pwRes.password)}</code>\nGunakan ID Telegram Anda dan password ini di menu Login Mini App.`
+        : `🔑 Gunakan password login Anda yang sudah ada di menu Login Mini App.`);
+    bot.sendMessage(u._id, trialMsg, { parse_mode: 'HTML' }).catch(() => {});
+    return res.json({ ok: true, message: 'Uji coba gratis aktif! Password login dikirim ke chat bot Telegram Anda.', data: await snapshot(u) });
   } catch (e) {
     return res.status(400).json({ ok: false, error: e.message || 'Gagal klaim uji coba' });
   }
 });
 
-// ---------- Proxy terjemahan (agar semua bahasa jalan walau HP tidak bisa akses Google langsung) ----------
-const trCache = new Map();
-const trHits = new Map();
-setInterval(() => trHits.clear(), 60 * 1000).unref();
-const TR_LANGS = { en: 'en', es: 'es', de: 'de', fr: 'fr', tr: 'tr', uz: 'uz', ru: 'ru', vi: 'vi', tl: 'tl', th: 'th', ms: 'ms', hi: 'hi', ur: 'ur', zh: 'zh-CN', ko: 'ko', ja: 'ja', af: 'af', ar: 'ar' };
-async function gtServer(text, tl) {
-  const url = 'https://translate.googleapis.com/translate_a/single?client=gtx&sl=id&tl=' + encodeURIComponent(tl) + '&dt=t&q=' + encodeURIComponent(text);
-  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-  if (!r.ok) throw new Error('tr ' + r.status);
-  const j = await r.json();
-  return (j[0] || []).map((x) => x[0]).join('');
-}
+// ---------- Proxy terjemahan Mini App (semua bahasa jalan walau HP tidak bisa akses Google langsung) ----------
 app.post('/api/i18n', async (req, res) => {
   try {
     const ip = clientIp(req);
     const n = (trHits.get(ip) || 0) + 1;
     trHits.set(ip, n);
-    if (n > 60) return res.status(429).json({ ok: false, error: 'rate' });
+    if (n > 400) return res.status(429).json({ ok: false, error: 'rate' });
     const tl = TR_LANGS[String((req.body || {}).lang || '')];
-    const texts = Array.isArray((req.body || {}).texts) ? req.body.texts.slice(0, 30) : [];
+    const texts = Array.isArray((req.body || {}).texts) ? req.body.texts.slice(0, 40) : [];
     if (!tl || !texts.length) return res.status(400).json({ ok: false });
-    const out = [];
-    for (const raw of texts) {
-      const t = String(raw || '').replace(/\s*\n\s*/g, ' ').slice(0, 400);
-      const key = tl + '|' + t;
-      if (!t.trim()) { out.push(''); continue; }
-      if (trCache.has(key)) { out.push(trCache.get(key)); continue; }
-      let tr = '';
-      try { tr = (await gtServer(t, tl)).trim(); } catch (e) { tr = ''; }
-      if (tr) { if (trCache.size > 20000) trCache.clear(); trCache.set(key, tr); }
-      out.push(tr);
-    }
+    const out = new Array(texts.length).fill('');
+    await runPool(texts.map((t, i) => ({ t, i })), 8, async ({ t, i }) => {
+      out[i] = await translateText(String(t || ''), tl);
+    });
     return res.json({ ok: true, texts: out });
   } catch (e) {
     return res.status(400).json({ ok: false });
@@ -2999,6 +3645,7 @@ app.post('/api/auth/login', async (req, res) => {
       if (body.asset && ASSETS[String(body.asset).toUpperCase()]) selectAsset(u, body.asset);
     }
 
+    touchLang(u, req);
     u.isSessionLocked = false;
     u.lastLoginAt = Date.now();
     logActivity('LOGIN', u._id, u.name, 'Login Mini App');
@@ -3042,6 +3689,7 @@ app.use('/api', async (req, res, next) => {
   const n = (hits.get(u._id) || 0) + 1;
   hits.set(u._id, n);
   if (n > 180) return res.status(429).json({ ok: false, error: 'Terlalu banyak permintaan, tunggu sebentar' });
+  touchLang(u, req);
   req.user = u;
   next();
 });
@@ -3132,11 +3780,7 @@ app.post(
       if (Date.now() < rec.until) {
         throw new Error('Terlalu banyak salah. Coba lagi dalam ' + Math.ceil((rec.until - Date.now()) / 1000) + ' detik');
       }
-      const sha = sha256Hex(pinVal);
-      const allowed = kind === 'fallback'
-        ? FALLBACK_ADMIN_PIN_HASHES
-        : [...MAIN_ADMIN_PIN_HASHES, ...(rentalConfig.adminPinHashes || [])];
-      if (!pinVal || !allowed.includes(sha)) {
+      if (!pinVal || !adminPinMatches(kind, pinVal)) {
         rec.n += 1;
         if (rec.n >= 5) { rec.n = 0; rec.until = Date.now() + 60000; }
         adminPinFails.set(String(u._id), rec);
@@ -3146,6 +3790,48 @@ app.post(
       adminPinFails.delete(String(u._id));
       logActivity('ADMIN_PIN_OK', u._id, u.name, `PIN ${kind === 'fallback' ? 'cadangan' : 'utama'} benar`);
       return { message: 'PIN Admin Terverifikasi' };
+    },
+    true
+  )
+);
+
+app.post(
+  '/api/admin/change-pin',
+  h(
+    async (u, req) => {
+      requireAdmin(u);
+      const b = req.body || {};
+      const kind = b.kind === 'fallback' ? 'fallback' : 'main';
+      const cur = String(b.current || '').trim();
+      const next = String(b.next || '').trim();
+      const lockKey = 'chg:' + String(u._id);
+      const rec = adminPinFails.get(lockKey) || { n: 0, until: 0 };
+      if (Date.now() < rec.until) throw new Error('Terlalu banyak salah. Coba lagi dalam ' + Math.ceil((rec.until - Date.now()) / 1000) + ' detik');
+      // Wajib memasukkan PIN utama yang berlaku sekarang
+      if (!cur || !adminPinMatches('main', cur)) {
+        rec.n += 1;
+        if (rec.n >= 5) { rec.n = 0; rec.until = Date.now() + 5 * 60000; }
+        adminPinFails.set(lockKey, rec);
+        logActivity('ADMIN_PIN_CHANGE_FAIL', u._id, u.name, 'Ganti PIN gagal: PIN saat ini salah');
+        throw new Error('PIN utama saat ini tidak sesuai');
+      }
+      adminPinFails.delete(lockKey);
+      if (!/^\d{6,8}$/.test(next)) throw new Error('PIN baru harus 6 sampai 8 angka.');
+      if (next !== String(b.confirm || '').trim()) throw new Error('Ulangi PIN baru tidak sama.');
+      if (weakPin(next)) throw new Error('PIN terlalu mudah ditebak (angka sama / berurutan). Pilih PIN lain.');
+      if (adminPinMatches('main', next) || adminPinMatches('fallback', next)) throw new Error('PIN baru tidak boleh sama dengan PIN utama atau cadangan yang berlaku.');
+      rentalConfig.adminPin = { ...(rentalConfig.adminPin || {}), [kind]: makePinRecord(next, u._id) };
+      await saveRentalConfig();
+      logActivity('ADMIN_PIN_CHANGED', u._id, u.name, `PIN ${kind === 'fallback' ? 'cadangan' : 'utama'} diganti lewat panel`);
+      for (const admId of ADMIN_IDS) {
+        bot.sendMessage(admId, `🔐 <b>PIN admin ${kind === 'fallback' ? 'cadangan' : 'utama'} diganti</b>\nOleh: ${esc(u.name)} (<code>${esc(u._id)}</code>)\nWaktu: <code>${utcTimeStr()}</code>\nBukan Anda? Segera ganti PIN lagi dan periksa Log Aktivitas.`, { parse_mode: 'HTML' }).catch(() => {});
+      }
+      const left = ['main', 'fallback'].filter((k) => !(rentalConfig.adminPin && rentalConfig.adminPin[k]));
+      return {
+        message: 'PIN ' + (kind === 'fallback' ? 'cadangan' : 'utama') + ' berhasil diganti.' +
+          (left.length ? ' PIN ' + (left[0] === 'fallback' ? 'cadangan' : 'utama') + ' masih memakai bawaan lama; segera ganti juga.' : ''),
+        pinStatus: { main: !!rentalConfig.adminPin.main, fallback: !!rentalConfig.adminPin.fallback },
+      };
     },
     true
   )
@@ -3191,7 +3877,7 @@ app.get(
       };
       const orders = [...rentalOrders.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 50);
       return {
-        rentalConfig,
+        rentalConfig: publicRentalConfig(),
         users: userList,
         summary,
         orders,
@@ -3337,6 +4023,7 @@ app.post(
           account: String(m.account || '').trim(),
           holder: String(m.holder || '').trim(),
           country: (/^(ALL|[A-Za-z]{2})$/.test(String(m.country || '').trim()) ? String(m.country).trim().toUpperCase() : 'ALL'),
+          chain: (CHAIN_LABELS[String(m.chain || '').toLowerCase()] ? String(m.chain).toLowerCase() : 'manual'),
         }));
       }
       if (body.instructions !== undefined) {
@@ -3348,10 +4035,13 @@ app.post(
       if (body.autoApprove !== undefined) {
         rentalConfig.autoApprove = !!body.autoApprove;
       }
+      if (body.autoVerify !== undefined) {
+        rentalConfig.autoVerify = !!body.autoVerify;
+      }
       await saveRentalConfig();
       return {
         message: 'Konfigurasi Paket Sewa & Pembayaran berhasil disimpan!',
-        rentalConfig,
+        rentalConfig: publicRentalConfig(),
       };
     },
     true
@@ -3392,6 +4082,7 @@ app.post(
         targetU.rentalPlanName = planName || `Aktif Manual (+${addH} Jam)`;
         if (TIER_LIMITS[tier]) { targetU.rentalTier = tier; targetU.assetSlots = []; }
         targetU.purchasedAt = Date.now();
+        targetU.purchaseCount = Math.max(1, Number(targetU.purchaseCount) || 0);
         saveUser(targetU);
         logActivity('RENTAL_GRANT', targetU._id, targetU.name, `Admin ${u._id} menambah sewa +${addH} jam`, { hours: addH });
         notify(
@@ -3427,9 +4118,10 @@ app.post(
   h(async (u, req) => {
     const cfg = selectBroker(u, req.body && req.body.broker, req.body && req.body.mtSymbol);
     return {
-      message: `Broker aktif: ${cfg.name}`,
+      message: `Broker aktif: ${cfg.name} · Auto-Trade ${u.isAutoTrade ? 'ON' : 'OFF'}`,
       broker: cfg.id,
       hasKeys: hasBrokerKeys(u, cfg.id),
+      isAutoTrade: !!u.isAutoTrade,
     };
   })
 );
@@ -3650,7 +4342,7 @@ async function tickUser(u) {
   if (r.busy || !hasBrokerKeys(u) || !info.supportedOnBroker) return;
   try {
     const m = await getMarketForUser(u);
-    if (!m || !Number.isFinite(m.rsi)) return;
+    if (!m || m.simulated || !Number.isFinite(m.rsi)) return; // data cadangan buatan: jangan trading
 
     await withLock(u, async () => {
       const { rsi, price } = m;
@@ -3700,12 +4392,12 @@ async function tickUser(u) {
             );
           }
         }
-      } else if ((sig ? sig.buy : rsi < rsiBuy) && (!trendOn || trendIsUp(m)) && inSession(u) && !dailyLossHit(u) && Date.now() - (u.lastSellAt || 0) > COOLDOWN_MIN * 60000) {
+      } else if ((sig ? sig.buy : rsi < rsiBuy) && (!trendOn || trendIsUp(m)) && confirmEntry(m, tier).ok && inSession(u) && !dailyLossHit(u) && Date.now() - (u.lastSellAt || 0) > COOLDOWN_MIN * 60000) {
         const why = sig ? `${STRATEGIES[u.settings.strategy]}: ${sig.why}` : `RSI ${rsi.toFixed(2)}`;
         const res = await buy(u, why);
         await notify(
           u,
-          `▲ <b>AUTO BUY</b> (${info.symbol} · ${info.broker.short})\n▽ ${esc(why)}${trendOn ? ' · tren naik ✓' : ''}\n` +
+          `▲ <b>AUTO BUY</b> (${info.symbol} · ${info.broker.short})\n▽ ${esc(why)}${trendOn ? ' · tren naik ✓' : ''}${confirmEntry(m, tier).level > 0 ? ` · konfirmasi L${confirmEntry(m, tier).level} ✓` : ''}\n` +
             `▣ <code>${info.broker.isMt ? res.got.toFixed(2) : res.got.toFixed(4)}</code> ${info.unit} @ <code>${fmt(res.price, info.decimals)}</code>\n` +
             `◷ ${utcTimeStr()}`
         );
@@ -3894,6 +4586,8 @@ let mongoClient = null;
     rentalsCol = db.collection('rentals');
     logsCol = db.collection('activity_logs');
     csCol = db.collection('cs_messages');
+    trCol = db.collection('translations');
+    await trCol.createIndex({ at: 1 }, { expireAfterSeconds: 180 * 86400 }).catch(() => {});
     await csCol.createIndex({ at: 1 }, { expireAfterSeconds: 60 * 86400 }).catch(() => {});
     await logsCol.createIndex({ time: -1 });
     await logsCol.createIndex({ userId: 1, time: -1 });
