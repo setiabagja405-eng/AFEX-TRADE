@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: afex-trade-bot
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: TG_BOT_TOKEN
+        sync: false
+      - key: MONGO_URI
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: WEBAPP_URL
+        sync: false
+      - key: MONGO_DB
+        value: meta_bot
+      - key: ADMIN_IDS
+        value: 7706512451,8821716544
+      - key: KEEPALIVE_MIN
+        value: 5
+      - key: MAX_USERS
+        value: 500
+      - key: TRADE_GROUP_ID
+        sync: false
+      - key: TRADE_GROUP_THREAD_ID
+        sync: false
