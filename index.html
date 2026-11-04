@@ -338,6 +338,8 @@
     background:linear-gradient(90deg,#eab308,#d97706); box-shadow:0 0 12px rgba(234,179,8,.3);
     transition:transform .5s var(--spring), width .5s var(--spring); }
   .chart-modes .cm-btn { position:relative; z-index:1; }
+  .chart-modes .cm-btn.locked { opacity:.55; }
+  .chart-modes .cm-btn.locked::after { content:' \1F512'; font-size:9px; }
   .chart-modes.has-pill .cm-btn.active { background:transparent; border-color:transparent; box-shadow:none; }
 
   /* Harga berdenyut halus */
@@ -400,6 +402,9 @@
 .adm-fold>summary::after{content:"\25BE";color:var(--gold-dim);transition:transform .2s}
 .adm-fold[open]>summary::after{transform:rotate(180deg)}
 .adm-sum-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pm-off>summary .adm-sum-name{opacity:.5;text-decoration:line-through}
+.pm-sw{font-size:10px;font-weight:800;padding:3px 8px;border-radius:10px;border:1px solid rgba(34,197,94,.5);color:#22c55e;cursor:pointer;white-space:nowrap}
+.pm-sw.off{border-color:rgba(239,68,68,.5);color:#f87171}
 .adm-sum-cc{font-size:10px;padding:2px 6px;border-radius:6px;border:1px solid var(--line-soft);color:var(--gold-dim)}
 #admPmList{max-height:60vh;overflow-y:auto}
 
@@ -666,9 +671,9 @@
       <div class="chart-modes has-pill" id="chartModeTabs">
         <span class="seg-pill" id="segPill"></span>
         <button type="button" class="cm-btn active" data-cmode="candlestick">Candlestick</button>
-        <button type="button" class="cm-btn" data-cmode="live">Live Chart</button>
-        <button type="button" class="cm-btn" data-cmode="bar">Bar Chart</button>
-        <button type="button" class="cm-btn" data-cmode="area">Area Chart</button>
+        <button type="button" class="cm-btn" data-cmode="live" data-cfeat="chart_live" data-cneed="Pro">Live Chart</button>
+        <button type="button" class="cm-btn" data-cmode="bar" data-cfeat="chart_modes" data-cneed="Trader">Bar Chart</button>
+        <button type="button" class="cm-btn" data-cmode="area" data-cfeat="chart_modes" data-cneed="Trader">Area Chart</button>
       </div>
       <div class="chartbox big" id="wrapMainChart">
         <canvas id="mainChart"></canvas>
@@ -679,10 +684,10 @@
         </div>
       </div>
       <div class="chart-hint">Cubit 2 jari untuk zoom · geser untuk menggulir · ketuk candle untuk detail · ketuk 2x untuk reset</div>
-      <div class="analysis-desc" id="chartAnalysisNote" style="margin-top:10px">Memuat analisis grafik...</div>
+      <div class="analysis-desc" id="chartAnalysisNote" data-feat="chart_rsi" style="margin-top:10px">Memuat analisis grafik...</div>
     </section>
-    <section class="card"><h3><span><span class="gi" data-i="activity"></span>Indikator RSI (14)</span></h3><div class="chartbox" style="height:165px"><canvas id="rsiChart"></canvas></div></section>
-    <section class="card"><h3><span><span class="gi" data-i="trend"></span>Riwayat Profit 7 Hari</span></h3><div class="chartbox" style="height:165px"><canvas id="pnlChart"></canvas></div></section>
+    <section class="card" data-feat="chart_rsi"><h3><span><span class="gi" data-i="activity"></span>Indikator RSI (14)</span></h3><div class="chartbox" style="height:165px"><canvas id="rsiChart"></canvas></div></section>
+    <section class="card" data-feat="chart_pnl"><h3><span><span class="gi" data-i="trend"></span>Riwayat Profit 7 Hari</span></h3><div class="chartbox" style="height:165px"><canvas id="pnlChart"></canvas></div></section>
   </div>
 
   <!-- TAB: SETELAN -->
@@ -729,7 +734,7 @@
         <ul>
           <li>Kirim nominal sesuai harga paket ke alamat/rekening yang tampil. Untuk crypto, pilih jaringan yang <b>sama persis</b> dengan metode yang dipilih, lalu tempel TxHash lengkap.</li>
           <li>TxHash yang sama tidak bisa dipakai dua kali. Jika belum terdeteksi, sistem mengecek ulang beberapa menit; lewat itu admin yang memproses.</li>
-          <li>Menu <b>CS</b> khusus pembeli paket. Admin juga bisa membalas lewat bot, dan balasan muncul di sini.</li>
+          <li>Menu <b>CS</b> tersedia untuk semua akun. Admin juga bisa membalas lewat bot, dan balasan muncul di sini.</li>
         </ul>
       </details>
       <div style="font-size:10px;color:var(--gold-dim);margin-top:8px">Trading berisiko tinggi. Mulai dari Testnet atau jumlah kecil, dan jangan memakai dana yang tidak siap Anda rugikan.</div>
@@ -899,6 +904,12 @@
         <span><span class="gi" data-i="dollar"></span>2. Atur Cara Pembayaran Sewa</span>
         <span style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end"><button type="button" class="btn-mini" id="btnTogglePmList">Sembunyikan</button><button type="button" class="btn-mini" id="btnLoadEwallets">E-Wallet Semua Negara</button><button type="button" class="btn-mini" id="btnAddPm">+ Metode</button></span>
       </h3>
+      <div style="display:flex;gap:6px;align-items:center;margin:2px 0 8px;flex-wrap:wrap">
+        <select id="admPmCountry" style="flex:1;min-width:120px;padding:7px;border-radius:8px;border:1px solid var(--line-soft);background:var(--bg);color:var(--gold-soft);font-size:12px"></select>
+        <button type="button" class="btn-mini" id="btnPmCountryOff" style="color:var(--red);border-color:rgba(239,68,68,.4)">Nonaktifkan Negara</button>
+        <button type="button" class="btn-mini" id="btnPmCountryOn">Aktifkan Negara</button>
+      </div>
+      <div class="hint" style="margin-bottom:8px">Metode berstatus <b>NONAKTIF</b> tidak tampil di menu pembayaran user. Tekan tombol AKTIF/NONAKTIF di tiap metode, lalu <b>simpan</b>.</div>
       <div id="admPmList"></div>
       <div class="form" style="margin-top:8px">
         <div style="grid-column:span 2">
@@ -1230,9 +1241,9 @@
 <nav>
   <span class="nav-pill" id="navPill"></span>
   <button class="active" data-tab="home" type="button"><span class="gi" data-i="home"></span><span>Home</span></button>
-  <button data-tab="chart" data-feat="chart" type="button"><span class="gi" data-i="chart"></span><span>Grafik</span></button>
+  <button data-tab="chart" type="button"><span class="gi" data-i="chart"></span><span>Grafik</span></button>
   <button data-tab="setting" type="button"><span class="gi" data-i="sliders"></span><span>Setelan</span></button>
-  <button data-tab="cs" data-feat="cs" type="button"><span class="gi" data-i="user"></span><span>CS</span></button>
+  <button data-tab="cs" type="button"><span class="gi" data-i="user"></span><span>CS</span></button>
   <button data-tab="admin" id="navAdminBtn" type="button" style="display:none"><span class="gi" data-i="shield"></span><span>Admin</span></button>
 </nav>
 <div id="toast"></div>
@@ -1826,9 +1837,9 @@ const inTelegram = hasTgInit || !!(tg && tg.platform && tg.platform !== 'unknown
 const _qs = new URLSearchParams(location.search);
 const FEATURES_BY_TIER = {
   starter: ['trade', 'humanize'],
-  trader: ['trade', 'humanize', 'chart', 'analysis', 'trader_tools'],
-  pro: ['trade', 'humanize', 'chart', 'analysis', 'trader_tools', 'pro_tools'],
-  elite: ['trade', 'humanize', 'chart', 'analysis', 'trader_tools', 'pro_tools', 'alarm'],
+  trader: ['trade', 'humanize', 'chart', 'analysis', 'trader_tools', 'chart_modes', 'chart_rsi'],
+  pro: ['trade', 'humanize', 'chart', 'analysis', 'trader_tools', 'pro_tools', 'chart_modes', 'chart_rsi', 'chart_live', 'chart_pnl'],
+  elite: ['trade', 'humanize', 'chart', 'analysis', 'trader_tools', 'pro_tools', 'alarm', 'chart_modes', 'chart_rsi', 'chart_live', 'chart_pnl'],
 };
 // Demo HANYA bila dibuka manual (?demo=1), file lokal, atau localhost. Tidak pernah di dalam Telegram.
 const DEMO = !inTelegram && (_qs.has('demo') || location.protocol === 'file:' || /^(localhost|127\.0\.0\.1)$/.test(location.hostname));
@@ -2009,7 +2020,7 @@ function buildSimSnapshot() {
     userId: simState.userId,
     vip: isAdmin,
     planTier: isAdmin ? 'elite' : (FEATURES_BY_TIER[_qs.get('tier')] ? _qs.get('tier') : 'pro'),
-    features: FEATURES_BY_TIER[isAdmin ? 'elite' : (FEATURES_BY_TIER[_qs.get('tier')] ? _qs.get('tier') : 'pro')].concat(_qs.get('trial') ? [] : ['cs']),
+    features: FEATURES_BY_TIER[isAdmin ? 'elite' : (FEATURES_BY_TIER[_qs.get('tier')] ? _qs.get('tier') : 'pro')].concat(['cs']),
     alarms: isAdmin ? simState.alarms : [],
     maxAlarms: 10,
     username: simState.username,
@@ -2832,6 +2843,10 @@ function renderCharts(s, force) {
 
 document.querySelectorAll('#chartModeTabs .cm-btn').forEach((btn) => {
   btn.addEventListener('click', () => {
+    if (btn.classList.contains('locked')) {
+      toast('Mode ' + btn.textContent.trim() + ' tersedia mulai paket ' + (btn.dataset.cneed || 'lebih tinggi') + '. Upgrade paket untuk membukanya.', 'err');
+      return;
+    }
     currentChartMode = btn.dataset.cmode;
     document.querySelectorAll('#chartModeTabs .cm-btn').forEach((b) => b.classList.toggle('active', b === btn));
     mainChart.setMode(currentChartMode);
@@ -3025,7 +3040,7 @@ function methodsForCountry(pms, cc) {
     var c = String(m.country || (m.id === 'pm_bank' ? 'ID' : 'ALL')).toUpperCase();
     var acc = String(m.account || '').trim();
     var filled = acc && !/^masukkan nomor/i.test(acc);
-    return filled && (c === 'ALL' || c === cc);
+    return filled && !m.disabled && (c === 'ALL' || c === cc);
   });
 }
 
@@ -3208,21 +3223,41 @@ $('btnCloseLoginModal').addEventListener('click', closeLoginModal);
 
 /* ===== Perjanjian risiko (centang) ===== */
 const AGREEMENT_VERSION = '2026-11-v1';
+let agrPendingSubmit = false; /* true = popup dibuka otomatis dari tombol Kirim */
+function openAgreement(fromSubmit) {
+  const txt = $('agrText'), ok = $('agrOk');
+  agrPendingSubmit = !!fromSubmit;
+  ok.disabled = true;
+  ok.textContent = fromSubmit ? 'Saya Sudah Membaca & Setuju, Kirim Pembayaran' : 'Saya Sudah Membaca';
+  $('agrReadHint').textContent = 'Gulir sampai bawah untuk melanjutkan.';
+  txt.scrollTop = 0;
+  $('agrOverlay').classList.add('show');
+  setTimeout(() => txt.dispatchEvent(new Event('scroll')), 120);
+}
 (function () {
   const txt = $('agrText'), ok = $('agrOk');
   function checkScroll() {
     if (txt.scrollTop + txt.clientHeight >= txt.scrollHeight - 6) { ok.disabled = false; $('agrReadHint').textContent = 'Anda sudah membaca sampai bawah.'; }
   }
   txt.addEventListener('scroll', checkScroll);
-  $('btnOpenAgreement').addEventListener('click', () => { txt.scrollTop = 0; $('agrOverlay').classList.add('show'); setTimeout(checkScroll, 80); });
+  $('btnOpenAgreement').addEventListener('click', () => openAgreement(false));
   ok.addEventListener('click', () => {
+    if (ok.disabled) return;
     $('agrOverlay').classList.remove('show');
     $('agrChk').disabled = false;
-    $('agrStatus').textContent = 'Centang kotak di atas untuk menyetujui.';
+    const go = agrPendingSubmit;
+    agrPendingSubmit = false;
+    if (go) {
+      $('agrChk').checked = true; /* menekan tombol setuju = persetujuan */
+      $('agrStatus').textContent = 'Perjanjian disetujui.';
+      $('btnSubmitRentalOrder').click(); /* lanjutkan kirim pembayaran */
+    } else {
+      $('agrStatus').textContent = 'Centang kotak di atas untuk menyetujui.';
+    }
   });
 })();
 function resetAgreement() {
-  $('agrChk').checked = false; $('agrChk').disabled = true; $('agrOk').disabled = true;
+  $('agrChk').checked = false; $('agrChk').disabled = true; $('agrOk').disabled = true; agrPendingSubmit = false;
   $('agrReadHint').textContent = 'Gulir sampai bawah untuk melanjutkan.';
   $('agrStatus').textContent = 'Baca perjanjian dulu untuk mengaktifkan kotak centang.';
 }
@@ -3232,7 +3267,11 @@ $('btnSubmitRentalOrder').addEventListener('click', () => act('rentOrder', async
   const txProof = $('lg_txProof').value.trim();
   if ((((lastSnap && lastSnap.rentalConfig) || simState.rentalConfig).packages || []).some((p) => p.id === selectedPkgId && p.trial)) throw new Error('Paket uji coba gratis diklaim lewat tombol Klaim Uji Coba.');
   if (!$('lg_pmSelect').value) throw new Error('Belum ada metode pembayaran untuk negara/bahasa ini. Ganti bahasa atau hubungi admin.');
-  if (!$('agrChk').checked) throw new Error('Baca dan centang persetujuan Perjanjian Risiko Trading dulu sebelum mengirim pembayaran.');
+  if (!$('agrChk').checked) {
+    /* Belum setuju: tampilkan menu Perjanjian Risiko Trading, lalu lanjut kirim setelah disetujui */
+    openAgreement(true);
+    throw new Error('Dibatalkan');
+  }
   const j = await api('rental/order', 'POST', {
     identifier: ident,
     packageId: selectedPkgId,
@@ -3665,8 +3704,8 @@ function renderAdminEditors() {
 
   $('admPmList').innerHTML = adminEditMethods
     .map(
-      (m, i) => `<details class="adm-item adm-fold" data-pmkey="${escH(m.id)}"${admPmOpen.has(m.id) ? ' open' : ''}>
-        <summary><span class="adm-sum-name">${escH(m.name || 'Metode')}</span><span class="adm-sum-cc">${escH(String(m.country || 'ALL').toUpperCase())}</span></summary>
+      (m, i) => `<details class="adm-item adm-fold${m.disabled ? ' pm-off' : ''}" data-pmkey="${escH(m.id)}"${admPmOpen.has(m.id) ? ' open' : ''}>
+        <summary><span class="adm-sum-name">${escH(m.name || 'Metode')}</span><span class="adm-sum-cc">${escH(String(m.country || 'ALL').toUpperCase())}</span><span class="pm-sw${m.disabled ? ' off' : ''}" data-tgpm="${i}">${m.disabled ? 'NONAKTIF' : 'AKTIF'}</span></summary>
         <div class="form" style="margin-top:8px">
           <div><label>Nama Metode / Jaringan</label><input type="text" data-pmi="${i}" data-k="name" value="${escH(m.name)}"></div>
           <div><label>Atas Nama / Keterangan</label><input type="text" data-pmi="${i}" data-k="holder" value="${escH(m.holder || '')}"></div>
@@ -3703,7 +3742,32 @@ function renderAdminEditors() {
       renderAdminEditors();
     });
   });
+  $('admPmList').querySelectorAll('[data-tgpm]').forEach((b) => {
+    b.addEventListener('click', (ev) => {
+      ev.preventDefault(); ev.stopPropagation(); /* jangan buka/tutup lipatan */
+      const m = adminEditMethods[Number(b.dataset.tgpm)];
+      if (!m) return;
+      m.disabled = !m.disabled;
+      renderAdminEditors();
+    });
+  });
+  const cSel = $('admPmCountry');
+  if (cSel && !cSel.options.length) {
+    cSel.innerHTML = Object.keys(COUNTRY_NAMES).map((c) => `<option value="${c}">${escH(COUNTRY_NAMES[c] || c)} (${c})</option>`).join('');
+  }
 }
+function setPmCountryDisabled(off) {
+  const cc = $('admPmCountry').value;
+  let n = 0;
+  adminEditMethods.forEach((m) => {
+    const c = String(m.country || 'ALL').toUpperCase();
+    if (c === cc && !!m.disabled !== off) { m.disabled = off; n++; }
+  });
+  renderAdminEditors();
+  toast(n ? `${n} metode ${off ? 'dinonaktifkan' : 'diaktifkan'} untuk ${cc}. Tekan Simpan agar berlaku.` : `Tidak ada metode yang perlu diubah untuk ${cc}.`, n ? 'ok' : 'err');
+}
+$('btnPmCountryOff').addEventListener('click', () => setPmCountryDisabled(true));
+$('btnPmCountryOn').addEventListener('click', () => setPmCountryDisabled(false));
 
 $('btnAddPkg').addEventListener('click', () => {
   adminEditPackages.push({
@@ -4286,7 +4350,7 @@ async function load(silent) {
 }
 
 async function act(btn, fn) {
-  const all = document.querySelectorAll('.btn');
+  const all = document.querySelectorAll('.btn:not(#agrOk)');
   all.forEach((b) => (b.disabled = true));
   try {
     const j = await fn();
@@ -4405,6 +4469,15 @@ function applyFeatures(s) {
     const on = feats.includes(el.getAttribute('data-feat'));
     el.style.display = on ? '' : 'none';
   });
+  /* Mode grafik dikunci sesuai paket (tetap tampil + ikon gembok, klik = info upgrade) */
+  document.querySelectorAll('#chartModeTabs .cm-btn[data-cfeat]').forEach((b) => {
+    b.classList.toggle('locked', !feats.includes(b.getAttribute('data-cfeat')));
+  });
+  const curBtn = document.querySelector('#chartModeTabs .cm-btn.active');
+  if (curBtn && curBtn.classList.contains('locked')) {
+    const first = document.querySelector('#chartModeTabs .cm-btn[data-cmode="candlestick"]');
+    if (first) first.click();
+  }
   const active = document.querySelector('nav button.active');
   if (active && active.style.display === 'none') document.querySelector('nav button[data-tab="home"]').click();
   requestAnimationFrame(() => { try { moveNavPill(); } catch (e) {} });

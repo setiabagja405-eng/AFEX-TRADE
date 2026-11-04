@@ -570,6 +570,10 @@ function renderPriceChartPng(s) {
     minP = Math.min(minP, s.position.sl);
     maxP = Math.max(maxP, s.position.tp);
   }
+  if (s.closeLines) {
+    minP = Math.min(minP, s.closeLines.entry, s.closeLines.exit);
+    maxP = Math.max(maxP, s.closeLines.entry, s.closeLines.exit);
+  }
   const span = maxP - minP || 1;
   const lo = minP - span * 0.09,
     hi = maxP + span * 0.09;
@@ -611,6 +615,12 @@ function renderPriceChartPng(s) {
     drawLine(padL, yOf(s.position.entry), W - padR, yOf(s.position.entry), 1.8, 250, 204, 21, 230, true);
     drawLine(padL, yOf(s.position.tp), W - padR, yOf(s.position.tp), 1.8, 74, 222, 128, 230, true);
     drawLine(padL, yOf(s.position.sl), W - padR, yOf(s.position.sl), 1.8, 248, 113, 113, 230, true);
+  }
+  if (s.closeLines) {
+    // trade yang baru ditutup: kuning = harga masuk, hijau/merah = harga keluar (profit/rugi)
+    drawLine(padL, yOf(s.closeLines.entry), W - padR, yOf(s.closeLines.entry), 1.8, 250, 204, 21, 230, true);
+    const win = s.closeLines.exit >= s.closeLines.entry;
+    drawLine(padL, yOf(s.closeLines.exit), W - padR, yOf(s.closeLines.exit), 2.2, win ? 74 : 248, win ? 222 : 113, win ? 128 : 113, 240, true);
   }
 
   return encodePng(W, H, buf);
@@ -902,6 +912,7 @@ function touchLang(u, req) {
   const oSend = bot.sendMessage.bind(bot);
   bot.sendRaw = oSend; // kirim apa adanya (tanpa terjemahan otomatis)
   const oPhoto = bot.sendPhoto.bind(bot);
+  bot.sendPhotoRaw = oPhoto; // kirim foto apa adanya (untuk grup, tanpa terjemahan otomatis)
   const oDoc = bot.sendDocument.bind(bot);
   const oEditCap = bot.editMessageCaption.bind(bot);
   const oEditTxt = bot.editMessageText.bind(bot);
@@ -988,14 +999,15 @@ const TIER_LIMITS = {
 // Fitur yang tampil di Mini App sesuai paket. Paket Starter = hanya fitur trade inti.
 const TIER_FEATURES = {
   starter: ['trade', 'humanize'],
-  trader: ['trade', 'humanize', 'chart', 'analysis', 'trader_tools'],
-  pro: ['trade', 'humanize', 'chart', 'analysis', 'trader_tools', 'pro_tools'],
-  elite: ['trade', 'humanize', 'chart', 'analysis', 'trader_tools', 'pro_tools', 'alarm'],
+  // Grafik: Starter = Candlestick saja · Trader = + Bar/Area + RSI & analisis · Pro/Elite = + Live Chart + riwayat profit
+  trader: ['trade', 'humanize', 'chart', 'analysis', 'trader_tools', 'chart_modes', 'chart_rsi'],
+  pro: ['trade', 'humanize', 'chart', 'analysis', 'trader_tools', 'pro_tools', 'chart_modes', 'chart_rsi', 'chart_live', 'chart_pnl'],
+  elite: ['trade', 'humanize', 'chart', 'analysis', 'trader_tools', 'pro_tools', 'alarm', 'chart_modes', 'chart_rsi', 'chart_live', 'chart_pnl'],
 };
 const hasPurchased = (u) => isAdminId(u._id) || Number(u.purchaseCount || 0) > 0;
 function featuresFor(u) {
   const base = TIER_FEATURES[getUserTier(u)] || TIER_FEATURES.starter;
-  return hasPurchased(u) ? [...base, 'cs'] : [...base]; // 'cs' = chat customer service, hanya pembeli (bukan uji coba)
+  return [...base, 'cs']; // 'cs' = chat customer service, tersedia untuk semua akun (menu CS)
 }
 const hasFeature = (u, f) => featuresFor(u).includes(f);
 function inferTier(p) {
@@ -1942,6 +1954,84 @@ async function buy(u, note) {
   return { price, got, unit: info.unit, symbol: pos.symbol, decimals: info.decimals };
 }
 
+// ---------- Notifikasi close trade ke GRUP Telegram ----------
+// Konfigurasi: env TRADE_GROUP_ID (+ opsional TRADE_GROUP_THREAD_ID untuk topik forum),
+// atau admin ketik /setgroup di dalam grup (disimpan di database, menimpa env). /unsetgroup untuk mematikan.
+const TRADE_GROUP_ID_ENV = String(process.env.TRADE_GROUP_ID || '').trim();
+const TRADE_GROUP_THREAD_ENV = String(process.env.TRADE_GROUP_THREAD_ID || '').trim();
+function tradeGroupCfg() {
+  const c = rentalConfig.tradeGroup;
+  if (c && c.chatId) return c.enabled === false ? null : c;
+  if (TRADE_GROUP_ID_ENV) return { chatId: TRADE_GROUP_ID_ENV, threadId: TRADE_GROUP_THREAD_ENV, enabled: true, source: 'env' };
+  return null;
+}
+// Label akun: TESTNET / DEMO (bukan uang asli) atau LIVE (akun real)
+function accountLabel(u) {
+  const cfg = BROKERS[u.broker] || BROKERS.binance_testnet;
+  if (cfg.sandbox) return { tag: '🧪 TESTNET', desc: 'bukan uang asli', name: cfg.name };
+  let server = '';
+  try { const k = getActiveKeyObj(u); server = String((k && k.serverName) || ''); } catch (e) {}
+  const name = cfg.name + (server ? ` · ${server}` : '');
+  if (cfg.isMt && /demo|trial|test|practice|contest/i.test(server)) return { tag: '🧪 DEMO', desc: 'akun demo, bukan uang asli', name };
+  return { tag: '🔴 LIVE', desc: 'akun real', name };
+}
+async function postTradeToGroup(u, d) {
+  const g = tradeGroupCfg();
+  if (!g) return;
+  const { pos, price, qty, pnl, note, m, info } = d;
+  if (!(pnl > 0)) return; // hanya trade PROFIT yang dikirim ke grup (loss / impas tidak diposting)
+  const lab = accountLabel(u);
+  const win = true;
+  const entry = Number(pos.entry) || 0;
+  const pct = entry > 0 ? ((price - entry) / entry) * 100 : 0;
+  const q = info.quote || 'USDT';
+  const dec = info.decimals || 2;
+  const tag = `<a href="tg://user?id=${esc(u._id)}">${esc(u.name || 'User')}</a>` + (u.username ? ` (@${esc(u.username)})` : '');
+  const decided = (u.wins || 0) + (u.losses || 0);
+  const winRate = decided ? Math.round(((u.wins || 0) / decided) * 100) : 0;
+  const caption =
+    `✅ <b>TRADE DITUTUP · PROFIT</b>\n` +
+    `👤 ${tag}\n` +
+    `🏷 Akun: <b>${lab.tag}</b> (${esc(lab.desc)})\n` +
+    `🏦 ${esc(lab.name)}\n\n` +
+    `📊 <b>${esc(pos.symbol || info.symbol)}</b> · TF ${esc(TIMEFRAME)}\n` +
+    `▸ Masuk: <b>${fmt(entry, dec)}</b>\n` +
+    `▸ Keluar: <b>${fmt(price, dec)}</b>\n` +
+    `▸ Jumlah: ${fmt(qty, 6)} ${esc(info.unit || '')}\n` +
+    `💰 Hasil: <b>${sign(pnl, 4)} ${esc(q)}</b> (${sign(pct, 2)}%)\n` +
+    (note ? `📝 ${esc(String(note).slice(0, 80))}\n` : '') +
+    `\n📅 Hari ini: ${u.today ? u.today.trades : 0} trade · ${sign((u.today && u.today.pnl) || 0, 2)} ${esc(q)}\n` +
+    `🎯 Win rate: ${winRate}% (${u.wins || 0}W / ${u.losses || 0}L)\n` +
+    `⏰ ${new Date().toISOString().slice(0, 10)} ${utcTimeStr()}`;
+  const opts = { parse_mode: 'HTML', disable_web_page_preview: true };
+  if (g.threadId) opts.message_thread_id = Number(g.threadId);
+  let png = null;
+  try {
+    const n = CHART_CANDLES;
+    const closes = ((m && m.closes) || []).slice(-n);
+    if (closes.length > 1) {
+      png = renderPriceChartPng({
+        symbol: pos.symbol || info.symbol,
+        timeframe: TIMEFRAME.toUpperCase(),
+        price,
+        decimals: dec,
+        serverUtc: utcTimeStr(),
+        candles: { closes, labels: ((m && m.times) || []).slice(-n).map(utcHHMM) },
+        closeLines: { entry, exit: price },
+      });
+    }
+  } catch (e) {
+    console.error('Chart grup:', e.message);
+  }
+  try {
+    if (png) await bot.sendPhotoRaw(g.chatId, png, { ...opts, caption }, { filename: 'trade_close.png', contentType: 'image/png' });
+    else await bot.sendRaw(g.chatId, caption, opts);
+  } catch (e) {
+    console.error('Kirim ke grup:', e.message);
+    if (png) await bot.sendRaw(g.chatId, caption, opts).catch(() => {}); // cadangan: teks saja
+  }
+}
+
 async function sellPosition(u, note) {
   const pos = u.position;
   if (!pos || pos.amount <= 0) return null;
@@ -1978,6 +2068,7 @@ async function sellPosition(u, note) {
   if (u.isAutoTrade && dailyLossHit(u)) { u.isAutoTrade = false; dlPaused = true; }
   saveUser(u);
   logTrade(u, 'SELL', price, qty, pnl.toFixed(4), note);
+  postTradeToGroup(u, { pos, price, qty, pnl, note, m, info }).catch((e) => console.error('Grup:', e.message)); // tidak menghambat proses close
   if (dlPaused) {
     logActivity('DAILY_LOSS_STOP', u._id, u.name, `Auto-Trade berhenti: rugi harian ${Number(u.today.pnl).toFixed(4)} melewati batas ${u.settings.dailyLossLimit}`);
     notify(
@@ -2527,7 +2618,7 @@ async function snapshot(u) {
       autoVerify: rentalConfig.autoVerify !== false,
       instructions: rentalConfig.instructions,
       packages: rentalConfig.packages,
-      paymentMethods: rentalConfig.paymentMethods,
+      paymentMethods: (rentalConfig.paymentMethods || []).filter((m) => !m.disabled), // metode nonaktif tidak tampil ke user
     },
     myRentalOrders: myPendingOrders,
     broker: cfg.id,
@@ -2794,7 +2885,7 @@ function csAdd(userId, from, text) {
 const csList = (u) => (csChats.get(String(u._id)) || []).slice(-100).map((m) => ({ id: m._id, from: m.from, text: m.text, at: m.at }));
 function requireCs(u) {
   if (!hasFeature(u, 'cs')) {
-    throw new Error('Chat Customer Service khusus pembeli paket (tidak tersedia untuk uji coba gratis).');
+    throw new Error('Chat Customer Service tidak tersedia untuk akun ini.');
   }
 }
 async function csFromUser(u, rawText) {
@@ -2854,6 +2945,30 @@ bot.onText(/^\/balas(@\w+)?\s+(\d+)\s+([\s\S]+)$/, async (msg, m) => {
   if (msg.chat.type !== 'private' || !isAdminId(msg.from.id)) return;
   await csFromAdmin(String(msg.from.id), m[2], m[3]);
 });
+// ---------- Admin: atur grup notifikasi close trade ----------
+bot.onText(/^\/setgroup(@\w+)?(?:\s+(-?\d+))?(?:\s+(\d+))?\s*$/, async (msg, m) => {
+  if (!isAdminId(msg.from.id)) return;
+  const inGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
+  const chatId = inGroup ? String(msg.chat.id) : (m[2] || '');
+  if (!chatId) return bot.sendRaw(msg.chat.id, 'Ketik <code>/setgroup</code> di dalam grup tujuan, atau kirim <code>/setgroup -100xxxxxxxxxx</code> di chat pribadi.', { parse_mode: 'HTML' });
+  const threadId = inGroup ? (msg.is_topic_message && msg.message_thread_id ? String(msg.message_thread_id) : '') : (m[3] || '');
+  rentalConfig.tradeGroup = { chatId, threadId, enabled: true, title: inGroup ? String(msg.chat.title || '') : '' };
+  await saveRentalConfig();
+  logActivity('ADMIN', String(msg.from.id), 'admin', `Grup notifikasi close trade diatur: ${chatId}${threadId ? ' topik ' + threadId : ''}`);
+  await bot.sendRaw(msg.chat.id, `✅ Notifikasi close trade semua pengguna akan dikirim ke grup ini${threadId ? ' (topik ini)' : ''}.\nID: <code>${esc(chatId)}</code>\nPastikan bot sudah jadi anggota/admin grup. Matikan dengan /unsetgroup.`, { parse_mode: 'HTML' }).catch(() => {});
+});
+bot.onText(/^\/unsetgroup(@\w+)?\s*$/, async (msg) => {
+  if (!isAdminId(msg.from.id)) return;
+  rentalConfig.tradeGroup = { ...(rentalConfig.tradeGroup || {}), chatId: (rentalConfig.tradeGroup && rentalConfig.tradeGroup.chatId) || '', enabled: false };
+  await saveRentalConfig();
+  await bot.sendRaw(msg.chat.id, '⏹ Notifikasi close trade ke grup dimatikan.').catch(() => {});
+});
+bot.onText(/^\/groupstatus(@\w+)?\s*$/, async (msg) => {
+  if (!isAdminId(msg.from.id)) return;
+  const g = tradeGroupCfg();
+  await bot.sendRaw(msg.chat.id, g ? `📣 Grup notifikasi AKTIF\nID: <code>${esc(g.chatId)}</code>${g.threadId ? '\nTopik: ' + esc(g.threadId) : ''}\nSumber: ${g.source === 'env' ? 'env TRADE_GROUP_ID' : '/setgroup'}` : '📣 Grup notifikasi belum diatur / nonaktif. Ketik /setgroup di grup tujuan.', { parse_mode: 'HTML' }).catch(() => {});
+});
+
 bot.on('message', async (msg) => {
   try {
     if (!msg || msg.chat.type !== 'private' || !msg.text || /^\//.test(msg.text) || !msg.reply_to_message) return;
@@ -3320,7 +3435,7 @@ app.get('/api/rental/public-config', (req, res) => {
       autoVerify: rentalConfig.autoVerify !== false,
       instructions: rentalConfig.instructions,
       packages: rentalConfig.packages,
-      paymentMethods: rentalConfig.paymentMethods,
+      paymentMethods: (rentalConfig.paymentMethods || []).filter((m) => !m.disabled), // metode nonaktif tidak tampil ke user
     },
     serverUtc: utcTimeStr(),
   });
@@ -3359,9 +3474,12 @@ app.post('/api/rental/order', async (req, res) => {
     if (pkg.trial) {
       return res.status(400).json({ ok: false, error: 'Paket uji coba gratis diklaim lewat tombol Klaim Uji Coba, bukan lewat pembayaran.' });
     }
-    const pm =
-      (rentalConfig.paymentMethods || []).find((m) => m.id === body.methodId) ||
-      rentalConfig.paymentMethods[0] || { name: 'Transfer Manual' };
+    const activePms = (rentalConfig.paymentMethods || []).filter((m) => !m.disabled);
+    const reqPm = (rentalConfig.paymentMethods || []).find((m) => m.id === body.methodId);
+    if (reqPm && reqPm.disabled) {
+      return res.status(400).json({ ok: false, error: 'Metode pembayaran ini sedang dinonaktifkan. Pilih metode lain.' });
+    }
+    const pm = reqPm || activePms[0] || { name: 'Transfer Manual' };
     const agreement = validateAgreement(body.agreement);
     const txProof = String(body.txProof || '').trim();
     if (txProof.length < 3) {
@@ -4024,6 +4142,7 @@ app.post(
           holder: String(m.holder || '').trim(),
           country: (/^(ALL|[A-Za-z]{2})$/.test(String(m.country || '').trim()) ? String(m.country).trim().toUpperCase() : 'ALL'),
           chain: (CHAIN_LABELS[String(m.chain || '').toLowerCase()] ? String(m.chain).toLowerCase() : 'manual'),
+          disabled: !!m.disabled,
         }));
       }
       if (body.instructions !== undefined) {
