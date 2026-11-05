@@ -4250,7 +4250,7 @@ function render(s) {
   $('stBrokerStatus').textContent = s.hasKeys ? 'Terhubung ●' : 'Belum terhubung ○';
   $('stBrokerStatus').className = s.hasKeys ? 'up' : 'down';
   $('stBrokerSym').textContent = `${s.symbol} (${s.assetName || assetId})`;
-  $('lblAmountInput').textContent = isMt ? 'Ukuran order (Lot)' : `Jumlah beli (${unit})`;
+  $('lblAmountInput').textContent = isMt ? 'Ukuran order (Lot)' : `Jumlah beli (${unit}) · 1 ${unit} ≈ $${fmt(s.price || 0, s.decimals || 2)}`;
   $('s_amount').step = isMt ? '0.01' : '0.0001';
 
   const p = s.position;
@@ -4275,6 +4275,15 @@ function render(s) {
   $('avatar').classList.toggle('vip', vip);
   renderAlarms(s);
 
+  const selA = $('s_asset');
+  if (s.coins && s.coins.length && selA && !selA.dataset.coins) {
+    const g = document.createElement('optgroup');
+    g.label = 'Semua koin Binance (pair USDT)';
+    g.innerHTML = s.coins.map((c) => `<option value="${c}">${c} — ${c}/USDT</option>`).join('');
+    selA.appendChild(g);
+    selA.dataset.coins = '1';
+    if (assetId) selA.value = assetId;
+  }
   if (!settingsFilled) fillSettings(s.settings, assetId);
   renderCharts(s);
 }

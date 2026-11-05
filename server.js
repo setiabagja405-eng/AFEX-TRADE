@@ -1213,7 +1213,7 @@ function getUserTradeInfo(u) {
       defaultAmount: a.mtDefault,
       minAmount: a.mtMin,
       maxAmount: a.mtMax,
-      supportedOnBroker: true,
+      supportedOnBroker: !a.dynamic,
     };
   }
   return {
@@ -2638,7 +2638,8 @@ async function snapshot(u) {
     mtSymbol: assetCfg.mtSymbol,
     connectedBrokers,
     brokers: Object.values(BROKERS),
-    assets: Object.values(ASSETS),
+    assets: Object.values(ASSETS).filter((a) => !a.dynamic),
+    coins: Object.values(ASSETS).filter((a) => a.dynamic).map((a) => a.id),
     symbol: sym,
     base: info.base,
     timeframe: TIMEFRAME,
@@ -3316,7 +3317,7 @@ async function refreshLivePrices() {
   livePricesBusy = true;
   try {
     liveCycle++;
-    const crypto = Object.values(ASSETS).filter((a) => a.category === 'crypto' && a.spotSymbol);
+    const crypto = Object.values(ASSETS).filter((a) => a.category === 'crypto' && a.spotSymbol && !a.dynamic);
     let cryptoOk = new Set();
     try {
       const rows = await fetchBinance24h(crypto.map((a) => a.spotSymbol.replace('/', '')));
@@ -3353,6 +3354,7 @@ app.get('/api/prices', async (req, res) => {
     if (cold) { liveCycle = 0; await refreshLivePrices().catch(() => {}); }
     const out = {};
     for (const a of Object.values(ASSETS)) {
+      if (a.dynamic) continue;
       const p = livePrices.get(a.id);
       out[a.id] = p ? { price: p.price, changePct: p.changePct, at: p.at, src: p.src } : null;
     }
@@ -4755,6 +4757,7 @@ let mongoClient = null;
     } catch (e) {
       console.error('Muat chat CS:', e.message);
     }
+    await loadAllCoins().catch((e) => console.error('Muat semua koin gagal:', e.message));
     for (const doc of await usersCol.find({}).toArray()) {
       users.set(doc._id, normalizeUserDoc(doc));
     }
@@ -4780,7 +4783,7 @@ let mongoClient = null;
 
   try {
     await pubTestnet.loadMarkets();
-    console.log('Terhubung ke Binance Testnet · Seluruh Poin 1-5 Siap');
+    console.log('Server siap · Binance Testnet/Live tersedia');
     await bot.setMyCommands([
       { command: 'menu', description: '◈ Buka panel grafik & status' },
       { command: 'status', description: '⟳ Kirim grafik harga & status realtime (UTC)' },
@@ -4800,6 +4803,35 @@ let mongoClient = null;
     console.error('Peringatan inisialisasi market awal:', err.message);
   }
 })();
+
+// ---------- Semua koin Binance (pair USDT) otomatis masuk daftar aset ----------
+async function loadAllCoins() {
+  await pubLive.loadMarkets();
+  const tick = await pubLive.fetchTickers().catch(() => ({}));
+  const defUsd = Number(process.env.DEFAULT_ORDER_USDT || 8);
+  const maxUsd = Number(process.env.MAX_ORDER_USDT || 50); // pagar keamanan per order
+  const known = new Set(Object.values(ASSETS).map((a) => a.spotSymbol));
+  let n = 0;
+  for (const m of Object.values(pubLive.markets)) {
+    if (!m.spot || m.quote !== 'USDT' || !m.active || known.has(m.symbol)) continue;
+    if (/(UP|DOWN|BULL|BEAR)$/.test(m.base)) continue;
+    const id = String(m.base).toUpperCase();
+    const px = tick[m.symbol] && Number(tick[m.symbol].last);
+    if (ASSETS[id] || !(px > 0)) continue;
+    const minCost = (m.limits && m.limits.cost && m.limits.cost.min) || 5;
+    const q = (v) => Number(pubLive.amountToPrecision(m.symbol, v));
+    const spotMin = q((minCost * 1.15) / px);
+    const spotDefault = Math.max(q(defUsd / px), spotMin);
+    if (!(spotMin > 0)) continue;
+    ASSETS[id] = {
+      id, name: id, category: 'crypto', base: m.base, spotSymbol: m.symbol, mtSymbol: null, yahoo: null,
+      decimals: px >= 100 ? 2 : px >= 1 ? 4 : px >= 0.01 ? 6 : 8, fallbackPrice: px,
+      spotDefault, spotMin, spotMax: Math.max(q(maxUsd / px), spotDefault), dynamic: true,
+    };
+    n++;
+  }
+  console.log(`Semua koin: ${n} pair USDT ditambahkan ke daftar aset`);
+}
 
 async function shutdown() {
   try {

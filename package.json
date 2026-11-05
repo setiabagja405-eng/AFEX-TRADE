@@ -1,7 +1,7 @@
 {
   "name": "meta-bot-miniapp",
   "version": "2.0.0",
-  "description": "Bot trading Telegram + Mini App multi-user (Binance Testnet)",
+  "description": "Bot trading Telegram + Mini App multi-user (Binance Spot Testnet/Live + MT4/5)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

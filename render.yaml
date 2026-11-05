@@ -3,6 +3,7 @@ services:
     name: afex-trade-bot
     runtime: node
     plan: free
+    region: singapore   # Binance.com memblokir IP Amerika (HTTP 451); Singapore aman
     buildCommand: npm install
     startCommand: node server.js
     healthCheckPath: /health
@@ -24,6 +25,10 @@ services:
         value: 7706512451,8821716544
       - key: KEEPALIVE_MIN
         value: 5
+      - key: DEFAULT_ORDER_USDT
+        value: 8
+      - key: MAX_ORDER_USDT
+        value: 20
       - key: MAX_USERS
         value: 500
       - key: TRADE_GROUP_ID
