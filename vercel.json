@@ -2,7 +2,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://https://afex-trade.onrender.com/api/:path*"
+      "destination": "https://afex-trade.onrender.com/api/:path*"
     }
   ]
 }
