@@ -720,6 +720,14 @@ function verifySessionToken(token) {
 
 const bot = new TelegramBot(TOKEN, { polling: false });
 
+// Proxy IP statis (mis. QuotaGuard) HANYA untuk akun Binance Live yang memakai API key,
+// supaya Binance melihat IP tetap yang Anda daftarkan di "trusted IPs". Testnet & data publik tidak lewat proxy.
+const BINANCE_PROXY = process.env.BINANCE_PROXY_URL || process.env.QUOTAGUARDSTATIC_URL || '';
+if (BINANCE_PROXY) {
+  try { console.log('Proxy IP statis aktif untuk Binance Live:', new URL(BINANCE_PROXY).host); }
+  catch (e) { console.error('BINANCE_PROXY_URL tidak valid:', e.message); }
+}
+
 function makeBinance(opts = {}, sandbox = true) {
   const ex = new ccxt.binance({
     enableRateLimit: true,
@@ -728,6 +736,7 @@ function makeBinance(opts = {}, sandbox = true) {
     ...opts,
   });
   if (sandbox) ex.setSandboxMode(true);
+  else if (BINANCE_PROXY && opts.apiKey) ex.httpsProxy = BINANCE_PROXY;
   return ex;
 }
 const pubTestnet = makeBinance({}, true);
