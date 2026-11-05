@@ -29,6 +29,8 @@ services:
         value: 8
       - key: MAX_ORDER_USDT
         value: 20
+      - key: BINANCE_PROXY_URL
+        sync: false
       - key: MAX_USERS
         value: 500
       - key: TRADE_GROUP_ID
