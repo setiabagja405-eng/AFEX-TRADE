@@ -2546,7 +2546,22 @@ async function snapshot(u) {
     try {
       bal = await getBalance(u);
     } catch (e) {
-      keyError = `Gagal membaca akun ${cfg.short}: periksa koneksi/kredensial`;
+      const raw = String((e && e.message) || e || '').replace(/\/\/[^@\s/]+@/g, '//***@').slice(0, 300);
+      const now = Date.now();
+      const rr = rt(u._id);
+      if (!rr.balErrAt || now - rr.balErrAt > 60000) {
+        rr.balErrAt = now;
+        console.error(`[saldo] user ${u._id} ${cfg.short}: ${e && e.constructor ? e.constructor.name : 'Error'}: ${raw}`);
+      }
+      let hint = 'periksa koneksi/kredensial';
+      if (/-2015|Invalid API-key|IP, or permissions/i.test(raw)) hint = 'API key ditolak Binance (IP belum didaftarkan / izin kurang)';
+      else if (/-1021|Timestamp/i.test(raw)) hint = 'selisih waktu server (coba lagi)';
+      else if (/407|Proxy Authentication/i.test(raw)) hint = 'password proxy salah (cek BINANCE_PROXY_URL)';
+      else if (/ECONNREFUSED|ETIMEDOUT|ECONNRESET|timed out|RequestTimeout|socket hang up|tunneling/i.test(raw)) hint = 'proxy tidak bisa dihubungi (cek BINANCE_PROXY_URL & tinyproxy)';
+      else if (/418|-1003|banned/i.test(raw)) hint = 'IP diblokir sementara oleh Binance';
+      else if (/451|restricted location/i.test(raw)) hint = 'Binance memblokir lokasi IP';
+      else if (/bad decrypt|auth|Unsupported state/i.test(raw)) hint = 'kunci tersimpan tidak bisa dibaca (ENCRYPTION_KEY berubah?)';
+      keyError = `Gagal membaca akun ${cfg.short}: ${hint}`;
     }
   }
   const { tp, sl } = u.settings;
